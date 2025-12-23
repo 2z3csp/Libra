@@ -328,11 +328,17 @@ class RegisterDialog(QDialog):
         self.main_category_edit.setEditable(True)
         self.sub_category_edit = QComboBox()
         self.sub_category_edit.setEditable(True)
+        if self.main_category_edit.lineEdit():
+            self.main_category_edit.lineEdit().setPlaceholderText("例：案件　記入 or 選択")
+        if self.sub_category_edit.lineEdit():
+            self.sub_category_edit.lineEdit().setPlaceholderText("例：図面　記入 or 選択")
 
         if main_category_options:
             self.main_category_edit.addItems(main_category_options)
         if sub_category_options:
             self.sub_category_edit.addItems(sub_category_options)
+        self.main_category_edit.setCurrentIndex(-1)
+        self.sub_category_edit.setCurrentIndex(-1)
 
         form.addRow("登録フォルダパス", path_row)
         form.addRow("登録名", self.name_edit)
