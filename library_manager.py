@@ -1,0 +1,933 @@
+# library_manager_mock.py
+# PySide6 mock for folder-based document versioning on OneDrive-synced folders.
+# - Register folders (G1)
+# - Show registered folders list (G0): name/link, latest rev, last edited date, editor
+# - Show files in selected folder
+# - Update (create next rev, move old to History, write metadata + memo)
+# - Replace (take external file, store as next rev, move old to History, write metadata + memo)
+#
+# Notes:
+# - Keeps your existing folder structure: "latest files" live in the registered folder root.
+# - Uses "History" folder under the registered folder.
+# - Stores metadata under "_Meta" folder under the registered folder.
+#
+# Tested targets: Windows, OneDrive local sync folder.
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import sys
+import datetime as dt
+import getpass
+from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, Any, List
+
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QSplitter,
+    QLineEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QFileDialog,
+    QMessageBox,
+    QDialog,
+    QLabel,
+    QFormLayout,
+    QPlainTextEdit,
+    QDialogButtonBox,
+    QHeaderView,
+    QAbstractItemView,
+    QGroupBox,
+)
+
+REV_RE = re.compile(
+    r"^(?P<base>.+)_rev(?P<A>\d+)\.(?P<B>\d+)\.(?P<C>\d+)_(?P<date>\d{8})$",
+    re.IGNORECASE,
+)
+
+TEMP_FILE_RE = re.compile(r"^~\$")  # Office temporary files
+
+
+def now_iso() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def today_yyyymmdd() -> str:
+    return dt.date.today().strftime("%Y%m%d")
+
+
+def user_name() -> str:
+    return getpass.getuser()
+
+
+def appdata_dir() -> str:
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "TeamLibraryManagerMock")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
+
+
+def load_registry() -> List[Dict[str, str]]:
+    if not os.path.exists(REGISTRY_PATH):
+        return []
+    try:
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            # normalize
+            out = []
+            for x in data:
+                if isinstance(x, dict) and "name" in x and "path" in x:
+                    out.append({"name": str(x["name"]), "path": str(x["path"])})
+            return out
+        return []
+    except Exception:
+        return []
+
+
+def save_registry(items: List[Dict[str, str]]) -> None:
+    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
+    """
+    Returns (history_dir, meta_dir)
+    """
+    history_dir = os.path.join(folder_path, "History")
+    meta_dir = os.path.join(folder_path, "_Meta")
+    os.makedirs(history_dir, exist_ok=True)
+    os.makedirs(meta_dir, exist_ok=True)
+    return history_dir, meta_dir
+
+
+def meta_path_for_folder(folder_path: str) -> str:
+    _, meta_dir = ensure_folder_structure(folder_path)
+    return os.path.join(meta_dir, "docmeta.json")
+
+
+def load_meta(folder_path: str) -> Dict[str, Any]:
+    p = meta_path_for_folder(folder_path)
+    if not os.path.exists(p):
+        return {"documents": {}}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"documents": {}}
+        if "documents" not in data or not isinstance(data["documents"], dict):
+            data["documents"] = {}
+        return data
+    except Exception:
+        return {"documents": {}}
+
+
+def save_meta(folder_path: str, meta: Dict[str, Any]) -> None:
+    p = meta_path_for_folder(folder_path)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def split_name_ext(filename: str) -> Tuple[str, str]:
+    base, ext = os.path.splitext(filename)
+    return base, ext
+
+
+def parse_rev_from_filename(filename: str) -> Tuple[str, Optional[Tuple[int, int, int, int]], str]:
+    """
+    Returns (doc_base_name, version_tuple_or_None, rev_str_or_empty)
+    version tuple: (A, B, C, YYYYMMDD as int)
+    """
+    base, ext = split_name_ext(filename)
+    m = REV_RE.match(base)
+    if not m:
+        return base + ext, None, ""
+    doc_base = m.group("base") + ext
+    A = int(m.group("A"))
+    B = int(m.group("B"))
+    C = int(m.group("C"))
+    d = int(m.group("date"))
+    rev_str = f"rev{A}.{B}.{C}_{m.group('date')}"
+    return doc_base, (A, B, C, d), rev_str
+
+
+def format_rev(A: int, B: int, C: int, yyyymmdd: str) -> str:
+    return f"rev{A}.{B}.{C}_{yyyymmdd}"
+
+
+def next_rev_from_current(current_rev: str) -> Tuple[int, int, int]:
+    """
+    current_rev like 'rev1.2.3_20251223' or ''
+    Returns (A,B,C) for the next revision, defaulting to (1,0,1) if none.
+    Behavior: keep A,B; increment C by 1. If no current_rev, start A=1,B=0,C=1.
+    """
+    if not current_rev:
+        return 1, 0, 1
+    m = re.match(r"^rev(\d+)\.(\d+)\.(\d+)_\d{8}$", current_rev, re.IGNORECASE)
+    if not m:
+        return 1, 0, 1
+    A, B, C = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return A, B, C + 1
+
+
+def safe_list_files(folder_path: str) -> List[str]:
+    files = []
+    try:
+        for name in os.listdir(folder_path):
+            full = os.path.join(folder_path, name)
+            if os.path.isdir(full):
+                # skip management folders
+                if name.lower() in {"history", "_meta"}:
+                    continue
+                continue
+            if TEMP_FILE_RE.match(name):
+                continue
+            files.append(name)
+    except Exception:
+        pass
+    return files
+
+
+@dataclass
+class FileRow:
+    filename: str
+    doc_key: str  # base name without rev (with extension)
+    rev: str
+    updated_at: str
+    updated_by: str
+    memo: str
+
+
+def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
+    """
+    Reads meta if exists and also scans real files.
+    Returns (meta, file_rows_for_view).
+    """
+    meta = load_meta(folder_path)
+    docs: Dict[str, Any] = meta.get("documents", {})
+    files = safe_list_files(folder_path)
+
+    # Build latest candidate per doc_key from filesystem (in case meta is missing/outdated)
+    latest_by_doc: Dict[str, Tuple[Optional[Tuple[int, int, int, int]], str]] = {}
+    for fn in files:
+        doc_key, ver_tuple, rev_str = parse_rev_from_filename(fn)
+        prev = latest_by_doc.get(doc_key)
+        if prev is None:
+            latest_by_doc[doc_key] = (ver_tuple, fn)
+        else:
+            prev_tuple, prev_fn = prev
+            # compare: version tuple if available, else keep existing if it has tuple
+            if prev_tuple is None and ver_tuple is not None:
+                latest_by_doc[doc_key] = (ver_tuple, fn)
+            elif prev_tuple is not None and ver_tuple is not None:
+                if ver_tuple > prev_tuple:
+                    latest_by_doc[doc_key] = (ver_tuple, fn)
+            elif prev_tuple is None and ver_tuple is None:
+                # fallback: lexicographic
+                if fn > prev_fn:
+                    latest_by_doc[doc_key] = (ver_tuple, fn)
+
+    # Merge into meta as "observed current" if meta lacks it
+    changed = False
+    for doc_key, (_t, fn) in latest_by_doc.items():
+        if doc_key not in docs:
+            docs[doc_key] = {
+                "title": doc_key,
+                "current_file": fn,
+                "current_rev": parse_rev_from_filename(fn)[2],
+                "updated_at": "",
+                "updated_by": "",
+                "last_memo": "",
+                "history": [],
+            }
+            changed = True
+        else:
+            # If current_file missing or no longer exists, refresh from scan
+            cur_fn = docs[doc_key].get("current_file", "")
+            if not cur_fn or cur_fn not in files:
+                docs[doc_key]["current_file"] = fn
+                docs[doc_key]["current_rev"] = parse_rev_from_filename(fn)[2]
+                changed = True
+
+    meta["documents"] = docs
+    if changed:
+        save_meta(folder_path, meta)
+
+    # Build view rows (latest per doc)
+    rows: List[FileRow] = []
+    for doc_key, info in docs.items():
+        cur_fn = info.get("current_file", "")
+        if not cur_fn:
+            continue
+        rows.append(
+            FileRow(
+                filename=cur_fn,
+                doc_key=doc_key,
+                rev=info.get("current_rev", ""),
+                updated_at=info.get("updated_at", ""),
+                updated_by=info.get("updated_by", ""),
+                memo=info.get("last_memo", ""),
+            )
+        )
+    # Sort by updated_at desc then filename
+    rows.sort(key=lambda r: (r.updated_at or "", r.filename), reverse=True)
+    return meta, rows
+
+
+class RegisterDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("登録（G1）")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.path_edit = QLineEdit()
+        self.path_btn = QPushButton("参照...")
+        self.path_btn.clicked.connect(self.pick_folder)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.path_btn)
+
+        self.name_edit = QLineEdit()
+
+        form.addRow("登録フォルダパス", path_row)
+        form.addRow("登録名", self.name_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("登録")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def pick_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "登録するフォルダを選択")
+        if path:
+            self.path_edit.setText(path)
+            if not self.name_edit.text().strip():
+                self.name_edit.setText(os.path.basename(path))
+
+    def get_values(self) -> Tuple[str, str]:
+        return self.name_edit.text().strip(), self.path_edit.text().strip()
+
+
+class MemoDialog(QDialog):
+    def __init__(self, title: str, subtitle: str, default_memo: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(subtitle))
+
+        self.memo = QPlainTextEdit()
+        self.memo.setPlaceholderText("作業メモ（空欄可）")
+        self.memo.setPlainText(default_memo)
+        layout.addWidget(self.memo, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("実行")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_memo(self) -> str:
+        return self.memo.toPlainText().strip()
+
+
+class ReplaceDialog(QDialog):
+    def __init__(self, target_filename: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("差し替え")
+        self.setMinimumWidth(640)
+
+        self.target_filename = target_filename
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"差し替え対象（現行）: {target_filename}"))
+
+        self.file_edit = QLineEdit()
+        self.file_btn = QPushButton("ファイル選択...")
+        self.file_btn.clicked.connect(self.pick_file)
+
+        row = QHBoxLayout()
+        row.addWidget(self.file_edit, 1)
+        row.addWidget(self.file_btn)
+        layout.addLayout(row)
+
+        self.memo = QPlainTextEdit()
+        self.memo.setPlaceholderText("作業メモ（空欄可） 例：外注成果品差し替え、図面反映 等")
+        layout.addWidget(self.memo, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("差し替え実行")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def pick_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "差し替えるファイルを選択")
+        if path:
+            self.file_edit.setText(path)
+
+    def get_values(self) -> Tuple[str, str]:
+        return self.file_edit.text().strip(), self.memo.toPlainText().strip()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("チーム間 図書管理モック（G0）")
+        self.resize(1300, 760)
+
+        self.registry = load_registry()
+
+        root = QWidget()
+        self.setCentralWidget(root)
+        root_layout = QVBoxLayout(root)
+
+        # Top controls
+        top = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("検索（登録名でフィルタ）")
+        self.search.textChanged.connect(self.refresh_folder_table)
+
+        btn_register = QPushButton("登録")
+        btn_register.clicked.connect(self.on_register)
+
+        btn_update = QPushButton("更新")
+        btn_update.clicked.connect(self.on_update)
+
+        btn_replace = QPushButton("差し替え")
+        btn_replace.clicked.connect(self.on_replace)
+
+        btn_rescan = QPushButton("再スキャン")
+        btn_rescan.clicked.connect(self.on_rescan)
+
+        top.addWidget(self.search, 1)
+        top.addWidget(btn_register)
+        top.addWidget(btn_update)
+        top.addWidget(btn_replace)
+        top.addWidget(btn_rescan)
+
+        root_layout.addLayout(top)
+
+        splitter = QSplitter(Qt.Horizontal)
+        root_layout.addWidget(splitter, 1)
+
+        # Left: registered folders table
+        left_box = QWidget()
+        left_layout = QVBoxLayout(left_box)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.folders_table = QTableWidget(0, 4)
+        self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最新rev", "最終更新日", "最終更新者"])
+        self.folders_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.folders_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.folders_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.folders_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.folders_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.folders_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.folders_table.itemSelectionChanged.connect(self.on_folder_selected)
+        self.folders_table.itemDoubleClicked.connect(self.on_folder_double_clicked)
+
+        left_layout.addWidget(self.folders_table)
+        splitter.addWidget(left_box)
+
+        # Middle: files table
+        mid_box = QWidget()
+        mid_layout = QVBoxLayout(mid_box)
+        mid_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.files_table = QTableWidget(0, 5)
+        self.files_table.setHorizontalHeaderLabels(["ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
+        self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.files_table.itemSelectionChanged.connect(self.on_file_selected)
+
+        mid_layout.addWidget(self.files_table)
+        splitter.addWidget(mid_box)
+
+        # Right: memo + history
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        memo_group = QGroupBox("最新メモ")
+        memo_layout = QVBoxLayout(memo_group)
+        self.memo_view = QPlainTextEdit()
+        self.memo_view.setReadOnly(True)
+        self.memo_view.setPlaceholderText("ここに最新メモを表示")
+        memo_layout.addWidget(self.memo_view)
+        right_layout.addWidget(memo_group, 1)
+
+        hist_group = QGroupBox("履歴（更新日・人・メモ）")
+        hist_layout = QVBoxLayout(hist_group)
+        self.hist_table = QTableWidget(0, 3)
+        self.hist_table.setHorizontalHeaderLabels(["更新日時", "更新者", "メモ"])
+        self.hist_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.hist_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.hist_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        hist_layout.addWidget(self.hist_table)
+        right_layout.addWidget(hist_group, 1)
+
+        splitter.addWidget(right_box)
+        splitter.setSizes([520, 520, 360])
+
+        # State
+        self.current_folder: Optional[Dict[str, str]] = None
+        self.current_meta: Optional[Dict[str, Any]] = None
+        self.current_file_rows: List[FileRow] = []
+
+        self.refresh_folder_table()
+
+    # ---------- UI helpers ----------
+    def info(self, msg: str):
+        QMessageBox.information(self, "情報", msg)
+
+    def warn(self, msg: str):
+        QMessageBox.warning(self, "注意", msg)
+
+    def ask(self, msg: str) -> bool:
+        return QMessageBox.question(self, "確認", msg, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+
+    def selected_folder_index(self) -> int:
+        sel = self.folders_table.selectionModel().selectedRows()
+        return sel[0].row() if sel else -1
+
+    def selected_file_index(self) -> int:
+        sel = self.files_table.selectionModel().selectedRows()
+        return sel[0].row() if sel else -1
+
+    def open_in_explorer(self, path: str):
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.warn(f"エクスプローラーで開けませんでした: {e}")
+
+    # ---------- refresh ----------
+    def refresh_folder_table(self):
+        query = self.search.text().strip().lower()
+        items = [x for x in self.registry if (query in x["name"].lower())]
+
+        self.folders_table.setRowCount(0)
+
+        for item in items:
+            name = item["name"]
+            path = item["path"]
+            latest_rev, last_date, last_by = "", "", ""
+
+            if os.path.isdir(path):
+                try:
+                    meta = load_meta(path)
+                    docs = meta.get("documents", {})
+                    # find most recently updated document
+                    best = None
+                    for _k, d in docs.items():
+                        ua = d.get("updated_at", "")
+                        if not ua:
+                            continue
+                        if best is None or ua > best[0]:
+                            best = (ua, d)
+                    if best is not None:
+                        d = best[1]
+                        latest_rev = d.get("current_rev", "")
+                        last_date = (d.get("updated_at", "") or "").replace("T", " ")
+                        last_by = d.get("updated_by", "")
+                except Exception:
+                    pass
+
+            r = self.folders_table.rowCount()
+            self.folders_table.insertRow(r)
+
+            it_name = QTableWidgetItem(name)
+            it_name.setToolTip(path)
+            it_name.setData(Qt.UserRole, path)
+
+            self.folders_table.setItem(r, 0, it_name)
+            self.folders_table.setItem(r, 1, QTableWidgetItem(latest_rev))
+            self.folders_table.setItem(r, 2, QTableWidgetItem(last_date))
+            self.folders_table.setItem(r, 3, QTableWidgetItem(last_by))
+
+        self.folders_table.repaint()
+
+    def refresh_files_table(self):
+        self.files_table.setRowCount(0)
+        self.memo_view.setPlainText("")
+        self.hist_table.setRowCount(0)
+
+        if not self.current_folder:
+            return
+
+        folder_path = self.current_folder["path"]
+        if not os.path.isdir(folder_path):
+            self.warn("登録フォルダが見つかりません。パスを確認してください。")
+            return
+
+        meta, rows = scan_folder(folder_path)
+        self.current_meta = meta
+        self.current_file_rows = rows
+
+        for row in rows:
+            r = self.files_table.rowCount()
+            self.files_table.insertRow(r)
+
+            it_fn = QTableWidgetItem(row.filename)
+            it_fn.setToolTip(os.path.join(folder_path, row.filename))
+            self.files_table.setItem(r, 0, it_fn)
+            self.files_table.setItem(r, 1, QTableWidgetItem(row.rev))
+            self.files_table.setItem(r, 2, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
+            self.files_table.setItem(r, 3, QTableWidgetItem(row.updated_by or ""))
+            self.files_table.setItem(r, 4, QTableWidgetItem(row.doc_key))
+
+        # hide DocKey column by default (can be useful for debugging)
+        self.files_table.setColumnHidden(4, True)
+
+    def refresh_right_pane_for_doc(self, doc_key: str):
+        self.memo_view.setPlainText("")
+        self.hist_table.setRowCount(0)
+
+        if not self.current_meta:
+            return
+        docs = self.current_meta.get("documents", {})
+        info = docs.get(doc_key)
+        if not isinstance(info, dict):
+            return
+
+        self.memo_view.setPlainText(info.get("last_memo", "") or "")
+
+        history = info.get("history", [])
+        if not isinstance(history, list):
+            return
+
+        # show newest first
+        items = list(history)
+        items.reverse()
+
+        for h in items:
+            r = self.hist_table.rowCount()
+            self.hist_table.insertRow(r)
+            self.hist_table.setItem(r, 0, QTableWidgetItem((h.get("updated_at", "") or "").replace("T", " ")))
+            self.hist_table.setItem(r, 1, QTableWidgetItem(h.get("updated_by", "") or ""))
+            self.hist_table.setItem(r, 2, QTableWidgetItem(h.get("memo", "") or ""))
+
+    # ---------- events ----------
+    def on_register(self):
+        dlg = RegisterDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, path = dlg.get_values()
+        if not name or not path:
+            self.warn("登録名とフォルダパスを入力してください。")
+            return
+        if not os.path.isdir(path):
+            self.warn("フォルダが存在しません。")
+            return
+
+        # Ensure History/_Meta
+        ensure_folder_structure(path)
+
+        # Prevent duplicates by path
+        for x in self.registry:
+            if os.path.normcase(x["path"]) == os.path.normcase(path):
+                self.warn("このフォルダは既に登録されています。")
+                return
+
+        self.registry.append({"name": name, "path": path})
+        save_registry(self.registry)
+        self.refresh_folder_table()
+        self.info("登録しました。")
+
+    def on_folder_selected(self):
+        idx = self.selected_folder_index()
+        if idx < 0:
+            self.current_folder = None
+            self.current_meta = None
+            self.current_file_rows = []
+            self.files_table.setRowCount(0)
+            return
+
+        # Determine which registry item matches current filtered table row:
+        # we stored path in tooltip/userrole for the name item
+        it = self.folders_table.item(idx, 0)
+        if not it:
+            return
+        path = it.data(Qt.UserRole)
+        name = it.text()
+        self.current_folder = {"name": name, "path": path}
+        self.refresh_files_table()
+
+    def on_folder_double_clicked(self, item: QTableWidgetItem):
+        if item.column() != 0:
+            return
+        path = item.data(Qt.UserRole)
+        if path and os.path.isdir(path):
+            self.open_in_explorer(path)
+
+    def on_file_selected(self):
+        idx = self.selected_file_index()
+        if idx < 0:
+            return
+        if idx >= len(self.current_file_rows):
+            return
+        row = self.current_file_rows[idx]
+        self.refresh_right_pane_for_doc(row.doc_key)
+
+    def on_rescan(self):
+        self.refresh_folder_table()
+        self.refresh_files_table()
+
+    # ---------- core operations ----------
+    def _get_selected_doc(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        """
+        Returns (folder_path, doc_key, doc_info)
+        """
+        if not self.current_folder or not self.current_meta:
+            self.warn("フォルダを選択してください。")
+            return None
+        file_idx = self.selected_file_index()
+        if file_idx < 0:
+            self.warn("対象ファイル（最新）を選択してください。")
+            return None
+        if file_idx >= len(self.current_file_rows):
+            return None
+        row = self.current_file_rows[file_idx]
+        doc_key = row.doc_key
+        docs = self.current_meta.get("documents", {})
+        info = docs.get(doc_key)
+        if not isinstance(info, dict):
+            self.warn("メタデータが見つかりません。再スキャンしてください。")
+            return None
+        return self.current_folder["path"], doc_key, info
+
+    def on_update(self):
+        sel = self._get_selected_doc()
+        if not sel:
+            return
+        folder_path, doc_key, info = sel
+
+        cur_fn = info.get("current_file", "")
+        cur_rev = info.get("current_rev", "")
+        if not cur_fn:
+            self.warn("現行ファイルが不明です。")
+            return
+
+        base_name, ext = split_name_ext(cur_fn)
+        doc_base, ver_tuple, _rev_str = parse_rev_from_filename(cur_fn)
+        # doc_base includes ext; we want base without ext for naming
+        doc_base_no_ext, _ = split_name_ext(doc_base)
+
+        A, B, C = next_rev_from_current(cur_rev)
+        new_rev = format_rev(A, B, C, today_yyyymmdd())
+        new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
+
+        subtitle = f"更新: {cur_fn}\n新規作成: {new_fn}\n（旧版は History に退避します）"
+        dlg = MemoDialog("更新（新版作成→差し替え登録）", subtitle, "", self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        memo = dlg.get_memo()
+
+        history_dir, _ = ensure_folder_structure(folder_path)
+
+        cur_path = os.path.join(folder_path, cur_fn)
+        new_path = os.path.join(folder_path, new_fn)
+
+        if not os.path.exists(cur_path):
+            self.warn("現行ファイルが見つかりません。")
+            return
+        if os.path.exists(new_path):
+            self.warn("新規ファイル名が既に存在します。再度実行してください（Cが進みます）。")
+            return
+
+        try:
+            # 1) copy current -> new
+            shutil.copy2(cur_path, new_path)
+
+            # 2) move old current -> History
+            hist_name = cur_fn
+            hist_path = os.path.join(history_dir, hist_name)
+            # avoid collision in History
+            if os.path.exists(hist_path):
+                ts = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+                hist_name = f"{split_name_ext(cur_fn)[0]}_{ts}{split_name_ext(cur_fn)[1]}"
+                hist_path = os.path.join(history_dir, hist_name)
+            shutil.move(cur_path, hist_path)
+
+            # 3) update meta
+            meta = load_meta(folder_path)
+            docs = meta.get("documents", {})
+            if doc_key not in docs:
+                docs[doc_key] = {
+                    "title": doc_key,
+                    "current_file": new_fn,
+                    "current_rev": new_rev,
+                    "updated_at": now_iso(),
+                    "updated_by": user_name(),
+                    "last_memo": memo,
+                    "history": [],
+                }
+            else:
+                d = docs[doc_key]
+                # push previous current into history list
+                prev_entry = {
+                    "rev": cur_rev,
+                    "file": hist_name,
+                    "updated_at": d.get("updated_at", ""),
+                    "updated_by": d.get("updated_by", ""),
+                    "memo": d.get("last_memo", ""),
+                }
+                d.setdefault("history", [])
+                if isinstance(d["history"], list):
+                    d["history"].append(prev_entry)
+
+                d["current_file"] = new_fn
+                d["current_rev"] = new_rev
+                d["updated_at"] = now_iso()
+                d["updated_by"] = user_name()
+                d["last_memo"] = memo
+
+            meta["documents"] = docs
+            save_meta(folder_path, meta)
+
+            # Refresh
+            self.refresh_files_table()
+            self.refresh_folder_table()
+
+            # Open the new file for convenience
+            try:
+                os.startfile(new_path)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        except Exception as e:
+            self.warn(f"更新に失敗しました: {e}")
+
+    def on_replace(self):
+        sel = self._get_selected_doc()
+        if not sel:
+            return
+        folder_path, doc_key, info = sel
+
+        cur_fn = info.get("current_file", "")
+        cur_rev = info.get("current_rev", "")
+        if not cur_fn:
+            self.warn("現行ファイルが不明です。")
+            return
+
+        dlg = ReplaceDialog(cur_fn, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        incoming_path, memo = dlg.get_values()
+        if not incoming_path or not os.path.exists(incoming_path):
+            self.warn("差し替えるファイルを選択してください。")
+            return
+
+        history_dir, _ = ensure_folder_structure(folder_path)
+
+        cur_path = os.path.join(folder_path, cur_fn)
+        if not os.path.exists(cur_path):
+            self.warn("現行ファイルが見つかりません。")
+            return
+
+        # Determine next rev and destination filename (keep doc base)
+        doc_base, _t, _r = parse_rev_from_filename(cur_fn)
+        doc_base_no_ext, ext = split_name_ext(doc_base)
+
+        A, B, C = next_rev_from_current(cur_rev)
+        new_rev = format_rev(A, B, C, today_yyyymmdd())
+        dest_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
+        dest_path = os.path.join(folder_path, dest_fn)
+
+        if os.path.exists(dest_path):
+            self.warn("新規ファイル名が既に存在します。再度実行してください（Cが進みます）。")
+            return
+
+        try:
+            # 1) move old current -> History
+            hist_name = cur_fn
+            hist_path = os.path.join(history_dir, hist_name)
+            if os.path.exists(hist_path):
+                ts = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+                hist_name = f"{split_name_ext(cur_fn)[0]}_{ts}{split_name_ext(cur_fn)[1]}"
+                hist_path = os.path.join(history_dir, hist_name)
+            shutil.move(cur_path, hist_path)
+
+            # 2) copy incoming -> dest
+            shutil.copy2(incoming_path, dest_path)
+
+            # 3) update meta
+            meta = load_meta(folder_path)
+            docs = meta.get("documents", {})
+            d = docs.get(doc_key, {
+                "title": doc_key,
+                "current_file": dest_fn,
+                "current_rev": new_rev,
+                "updated_at": now_iso(),
+                "updated_by": user_name(),
+                "last_memo": memo,
+                "history": [],
+            })
+
+            prev_entry = {
+                "rev": cur_rev,
+                "file": hist_name,
+                "updated_at": d.get("updated_at", ""),
+                "updated_by": d.get("updated_by", ""),
+                "memo": d.get("last_memo", ""),
+            }
+            d.setdefault("history", [])
+            if isinstance(d["history"], list):
+                d["history"].append(prev_entry)
+
+            d["current_file"] = dest_fn
+            d["current_rev"] = new_rev
+            d["updated_at"] = now_iso()
+            d["updated_by"] = user_name()
+            d["last_memo"] = memo
+
+            docs[doc_key] = d
+            meta["documents"] = docs
+            save_meta(folder_path, meta)
+
+            # Refresh
+            self.refresh_files_table()
+            self.refresh_folder_table()
+
+        except Exception as e:
+            self.warn(f"差し替えに失敗しました: {e}")
+
+
+def main():
+    app = QApplication(sys.argv)
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
