@@ -3,12 +3,12 @@
 # - Register folders (G1)
 # - Show registered folders list (G0): name/link, latest rev, last edited date, editor
 # - Show files in selected folder
-# - Update (create next rev, move old to History, write metadata + memo)
-# - Replace (take external file, store as next rev, move old to History, write metadata + memo)
+# - Update (create next rev, move old to _History, write metadata + memo)
+# - Replace (take external file, store as next rev, move old to _History, write metadata + memo)
 #
 # Notes:
 # - Keeps your existing folder structure: "latest files" live in the registered folder root.
-# - Uses "History" folder under the registered folder.
+# - Uses "_History" folder under the registered folder.
 # - Stores metadata under "_Meta" folder under the registered folder.
 #
 # Tested targets: Windows, OneDrive local sync folder.
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QTreeWidget,
     QTreeWidgetItem,
+    QMenu,
 )
 
 REV_RE = re.compile(
@@ -114,7 +115,7 @@ def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
     """
     Returns (history_dir, meta_dir)
     """
-    history_dir = os.path.join(folder_path, "History")
+    history_dir = os.path.join(folder_path, "_History")
     meta_dir = os.path.join(folder_path, "_Meta")
     os.makedirs(history_dir, exist_ok=True)
     os.makedirs(meta_dir, exist_ok=True)
@@ -197,7 +198,7 @@ def safe_list_files(folder_path: str) -> List[str]:
             full = os.path.join(folder_path, name)
             if os.path.isdir(full):
                 # skip management folders
-                if name.lower() in {"history", "_meta"}:
+                if name.lower() in {"_history", "_meta"}:
                     continue
                 continue
             if TEMP_FILE_RE.match(name):
@@ -295,7 +296,15 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
 
 
 class RegisterDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        initial_name: str = "",
+        initial_path: str = "",
+        initial_main_category: str = "",
+        initial_sub_category: str = "",
+        ok_label: str = "登録",
+    ):
         super().__init__(parent)
         self.setWindowTitle("登録（G1）")
         self.setMinimumWidth(520)
@@ -320,10 +329,19 @@ class RegisterDialog(QDialog):
         form.addRow("メインカテゴリ", self.main_category_edit)
         form.addRow("サブカテゴリ", self.sub_category_edit)
 
+        if initial_path:
+            self.path_edit.setText(initial_path)
+        if initial_name:
+            self.name_edit.setText(initial_name)
+        if initial_main_category:
+            self.main_category_edit.setText(initial_main_category)
+        if initial_sub_category:
+            self.sub_category_edit.setText(initial_sub_category)
+
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("登録")
+        buttons.button(QDialogButtonBox.Ok).setText(ok_label)
         buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -460,6 +478,8 @@ class MainWindow(QMainWindow):
         self.category_tree.setHeaderHidden(True)
         self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
         self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
+        self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
         tree_layout.addWidget(self.category_tree)
         splitter.addWidget(tree_box)
 
@@ -468,16 +488,16 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.folders_table = QTableWidget(0, 4)
-        self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最新rev", "最終更新日", "最終更新者"])
+        self.folders_table = QTableWidget(0, 2)
+        self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最終更新日"])
         self.folders_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.folders_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.folders_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.folders_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.folders_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.folders_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.folders_table.itemSelectionChanged.connect(self.on_folder_selected)
         self.folders_table.itemDoubleClicked.connect(self.on_folder_double_clicked)
+        self.folders_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.folders_table.customContextMenuRequested.connect(self.on_folders_table_context_menu)
 
         left_layout.addWidget(self.folders_table)
         splitter.addWidget(left_box)
@@ -564,6 +584,92 @@ class MainWindow(QMainWindow):
     def category_fallback(self, value: str, fallback: str) -> str:
         return value.strip() or fallback
 
+    def registry_index_by_path(self, path: str) -> int:
+        for idx, item in enumerate(self.registry):
+            if os.path.normcase(item["path"]) == os.path.normcase(path):
+                return idx
+        return -1
+
+    def edit_registered_folder(self, path: str):
+        idx = self.registry_index_by_path(path)
+        if idx < 0:
+            self.warn("登録情報が見つかりません。")
+            return
+        item = self.registry[idx]
+
+        dlg = RegisterDialog(
+            self,
+            initial_name=item.get("name", ""),
+            initial_path=item.get("path", ""),
+            initial_main_category=item.get("main_category", ""),
+            initial_sub_category=item.get("sub_category", ""),
+            ok_label="更新",
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        name, new_path, main_category, sub_category = dlg.get_values()
+        if not name or not new_path or not main_category or not sub_category:
+            self.warn("登録名・フォルダパス・メインカテゴリ・サブカテゴリを入力してください。")
+            return
+        if not os.path.isdir(new_path):
+            self.warn("フォルダが存在しません。")
+            return
+
+        old_path = item["path"]
+        if os.path.normcase(new_path) != os.path.normcase(old_path):
+            if self.registry_index_by_path(new_path) >= 0:
+                self.warn("このフォルダは既に登録されています。")
+                return
+            new_history = os.path.join(new_path, "_History")
+            new_meta = os.path.join(new_path, "_Meta")
+            if os.path.exists(new_history) or os.path.exists(new_meta):
+                self.warn("移動先に _History または _Meta が既に存在します。更新をキャンセルしました。")
+                return
+            old_history = os.path.join(old_path, "_History")
+            old_meta = os.path.join(old_path, "_Meta")
+            try:
+                if os.path.exists(old_history):
+                    shutil.move(old_history, new_history)
+                if os.path.exists(old_meta):
+                    shutil.move(old_meta, new_meta)
+            except Exception as e:
+                self.warn(f"_History/_Meta の移動に失敗しました: {e}")
+                return
+
+        ensure_folder_structure(new_path)
+
+        item["name"] = name
+        item["path"] = new_path
+        item["main_category"] = main_category
+        item["sub_category"] = sub_category
+        self.registry[idx] = item
+        save_registry(self.registry)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(old_path):
+            self.current_folder = {"name": name, "path": new_path}
+            self.refresh_files_table()
+        self.info("更新しました。")
+
+    def delete_registered_folder(self, path: str):
+        idx = self.registry_index_by_path(path)
+        if idx < 0:
+            self.warn("登録情報が見つかりません。")
+            return
+        if not self.ask("この登録を削除しますか？（_History/_Meta は削除しません）"):
+            return
+        self.registry.pop(idx)
+        save_registry(self.registry)
+        if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(path):
+            self.current_folder = None
+            self.current_meta = None
+            self.current_file_rows = []
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.refresh_files_table()
+        self.info("削除しました。")
+
     # ---------- refresh ----------
     def refresh_folder_table(self):
         query = self.search.text().strip().lower()
@@ -584,25 +690,22 @@ class MainWindow(QMainWindow):
         for item in items:
             name = item["name"]
             path = item["path"]
-            latest_rev, last_date, last_by = "", "", ""
+            last_date = ""
 
             if os.path.isdir(path):
                 try:
-                    meta = load_meta(path)
-                    docs = meta.get("documents", {})
-                    # find most recently updated document
-                    best = None
-                    for _k, d in docs.items():
-                        ua = d.get("updated_at", "")
-                        if not ua:
+                    files = safe_list_files(path)
+                    latest_mtime = None
+                    for filename in files:
+                        file_path = os.path.join(path, filename)
+                        try:
+                            mtime = os.path.getmtime(file_path)
+                        except Exception:
                             continue
-                        if best is None or ua > best[0]:
-                            best = (ua, d)
-                    if best is not None:
-                        d = best[1]
-                        latest_rev = d.get("current_rev", "")
-                        last_date = (d.get("updated_at", "") or "").replace("T", " ")
-                        last_by = d.get("updated_by", "")
+                        if latest_mtime is None or mtime > latest_mtime:
+                            latest_mtime = mtime
+                    if latest_mtime is not None:
+                        last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     pass
 
@@ -614,9 +717,7 @@ class MainWindow(QMainWindow):
             it_name.setData(Qt.UserRole, path)
 
             self.folders_table.setItem(r, 0, it_name)
-            self.folders_table.setItem(r, 1, QTableWidgetItem(latest_rev))
-            self.folders_table.setItem(r, 2, QTableWidgetItem(last_date))
-            self.folders_table.setItem(r, 3, QTableWidgetItem(last_by))
+            self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
 
         self.folders_table.repaint()
 
@@ -717,6 +818,47 @@ class MainWindow(QMainWindow):
             self.hist_table.setItem(r, 2, QTableWidgetItem(h.get("memo", "") or ""))
 
     # ---------- events ----------
+    def on_folders_table_context_menu(self, pos):
+        item = self.folders_table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        path_item = self.folders_table.item(row, 0)
+        if not path_item:
+            return
+        path = path_item.data(Qt.UserRole)
+        if not path:
+            return
+
+        menu = QMenu(self)
+        act_edit = menu.addAction("編集")
+        act_delete = menu.addAction("削除")
+        action = menu.exec(self.folders_table.viewport().mapToGlobal(pos))
+        if action == act_edit:
+            self.edit_registered_folder(path)
+        elif action == act_delete:
+            self.delete_registered_folder(path)
+
+    def on_category_tree_context_menu(self, pos):
+        item = self.category_tree.itemAt(pos)
+        if not item:
+            return
+        data = item.data(0, Qt.UserRole) or {}
+        if data.get("type") != "folder":
+            return
+        path = data.get("path")
+        if not path:
+            return
+
+        menu = QMenu(self)
+        act_edit = menu.addAction("編集")
+        act_delete = menu.addAction("削除")
+        action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+        if action == act_edit:
+            self.edit_registered_folder(path)
+        elif action == act_delete:
+            self.delete_registered_folder(path)
+
     def on_register(self):
         dlg = RegisterDialog(self)
         if dlg.exec() != QDialog.Accepted:
@@ -729,7 +871,7 @@ class MainWindow(QMainWindow):
             self.warn("フォルダが存在しません。")
             return
 
-        # Ensure History/_Meta
+        # Ensure _History/_Meta
         ensure_folder_structure(path)
 
         # Prevent duplicates by path
@@ -861,7 +1003,7 @@ class MainWindow(QMainWindow):
         new_rev = format_rev(A, B, C, today_yyyymmdd())
         new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
 
-        subtitle = f"更新: {cur_fn}\n新規作成: {new_fn}\n（旧版は History に退避します）"
+        subtitle = f"更新: {cur_fn}\n新規作成: {new_fn}\n（旧版は _History に退避します）"
         dlg = MemoDialog("更新（新版作成→差し替え登録）", subtitle, "", self)
         if dlg.exec() != QDialog.Accepted:
             return
@@ -883,10 +1025,10 @@ class MainWindow(QMainWindow):
             # 1) copy current -> new
             shutil.copy2(cur_path, new_path)
 
-            # 2) move old current -> History
+            # 2) move old current -> _History
             hist_name = cur_fn
             hist_path = os.path.join(history_dir, hist_name)
-            # avoid collision in History
+            # avoid collision in _History
             if os.path.exists(hist_path):
                 ts = dt.datetime.now().strftime("%Y%m%d%H%M%S")
                 hist_name = f"{split_name_ext(cur_fn)[0]}_{ts}{split_name_ext(cur_fn)[1]}"
@@ -983,7 +1125,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # 1) move old current -> History
+            # 1) move old current -> _History
             hist_name = cur_fn
             hist_path = os.path.join(history_dir, hist_name)
             if os.path.exists(hist_path):
