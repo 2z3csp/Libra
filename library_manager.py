@@ -1368,7 +1368,6 @@ class MainWindow(QMainWindow):
         selected_index = self.selected_file_index()
         if 0 <= selected_index < len(self.current_file_rows):
             selected_doc_key = self.current_file_rows[selected_index].doc_key
-        self.files_table.setRowCount(0)
         self.memo_view.setPlainText("")
         self.hist_table.setRowCount(0)
 
@@ -1388,9 +1387,8 @@ class MainWindow(QMainWindow):
         self.current_meta = meta
         self.current_file_rows = rows
 
-        for row in rows:
-            r = self.files_table.rowCount()
-            self.files_table.insertRow(r)
+        self.files_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
 
             doc_info = self.current_meta.get("documents", {}).get(row.doc_key, {})
             is_checked = self.doc_is_checked(folder_path, row.doc_key, doc_info if isinstance(doc_info, dict) else None)
