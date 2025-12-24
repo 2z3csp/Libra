@@ -547,6 +547,12 @@ class HistoryClearDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        current_text = "未設定"
+        current_version = parse_rev_numbers(current_rev)
+        if current_version:
+            current_text = format_version_numbers(*current_version)
+        layout.addWidget(QLabel(f"現在のバージョン: {current_text}"))
+
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["選択", "rev", "ファイル"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -577,7 +583,12 @@ class HistoryClearDialog(QDialog):
 
     def populate_table(self):
         self.table.setRowCount(0)
+        seen = set()
         for item in self.history_items:
+            key = (item.get("file", ""), item.get("rev", ""))
+            if key in seen:
+                continue
+            seen.add(key)
             r = self.table.rowCount()
             self.table.insertRow(r)
             check_item = QTableWidgetItem("")
@@ -643,6 +654,63 @@ class HistoryClearDialog(QDialog):
                 check_item.setCheckState(Qt.Checked)
             else:
                 check_item.setCheckState(Qt.Unchecked)
+
+
+class HistorySelectDialog(QDialog):
+    def __init__(self, history_items: List[Dict[str, Any]], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("差し戻し")
+        self.setMinimumWidth(520)
+        self.history_items = history_items
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("差し戻す履歴を選択してください。"))
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["rev", "ファイル"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("差し戻し")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.populate_table()
+
+    def populate_table(self):
+        self.table.setRowCount(0)
+        seen = set()
+        for item in self.history_items:
+            key = (item.get("file", ""), item.get("rev", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            rev_item = QTableWidgetItem(item.get("rev", ""))
+            rev_item.setData(Qt.UserRole, item)
+            file_item = QTableWidgetItem(item.get("file", ""))
+            self.table.setItem(r, 0, rev_item)
+            self.table.setItem(r, 1, file_item)
+
+    def selected_item(self) -> Optional[Dict[str, Any]]:
+        sel = self.table.selectionModel().selectedRows()
+        if not sel:
+            return None
+        row = sel[0].row()
+        item = self.table.item(row, 0)
+        if not item:
+            return None
+        data = item.data(Qt.UserRole)
+        if isinstance(data, dict):
+            return data
+        return None
 
 
 class MemoDialog(QDialog):
@@ -1380,19 +1448,6 @@ class MainWindow(QMainWindow):
             return None
         return self.current_folder["path"], doc_key, info
 
-    def _get_selected_history_entry(self) -> Optional[Dict[str, Any]]:
-        sel = self.hist_table.selectionModel().selectedRows()
-        if not sel:
-            return None
-        row = sel[0].row()
-        item = self.hist_table.item(row, 0)
-        if not item:
-            return None
-        data = item.data(Qt.UserRole)
-        if isinstance(data, dict):
-            return data
-        return None
-
     def on_update(self):
         sel = self._get_selected_doc()
         if not sel:
@@ -1594,7 +1649,15 @@ class MainWindow(QMainWindow):
             return
         folder_path, doc_key, info = sel
 
-        history_entry = self._get_selected_history_entry()
+        history_items = info.get("history", [])
+        if not isinstance(history_items, list) or not history_items:
+            self.warn("差し戻し対象の履歴がありません。")
+            return
+
+        dlg = HistorySelectDialog(history_items, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        history_entry = dlg.selected_item()
         if not history_entry:
             self.warn("差し戻し対象の履歴を選択してください。")
             return
