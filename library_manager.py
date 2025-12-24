@@ -802,18 +802,49 @@ class MemoDialog(QDialog):
         return self.memo.toPlainText().strip()
 
 
+class DropLineEdit(QLineEdit):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            event.ignore()
+            return
+        self.setText(path)
+        event.acceptProposedAction()
+
+
 class ReplaceDialog(QDialog):
     def __init__(self, target_filename: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("差し替え")
         self.setMinimumWidth(640)
+        self.setAcceptDrops(True)
 
         self.target_filename = target_filename
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"差し替え対象（現行）: {target_filename}"))
 
-        self.file_edit = QLineEdit()
+        self.file_edit = DropLineEdit()
         self.file_btn = QPushButton("ファイル選択...")
         self.file_btn.clicked.connect(self.pick_file)
 
@@ -823,6 +854,7 @@ class ReplaceDialog(QDialog):
         layout.addLayout(row)
 
         self.memo = QPlainTextEdit()
+        self.memo.setAcceptDrops(False)
         self.memo.setPlaceholderText("作業メモ（空欄可） 例：外注成果品差し替え、図面反映 等")
         layout.addWidget(self.memo, 1)
 
@@ -832,6 +864,30 @@ class ReplaceDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            event.ignore()
+            return
+        self.file_edit.setText(path)
+        event.acceptProposedAction()
 
     def pick_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "差し替えるファイルを選択")
