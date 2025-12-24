@@ -1230,6 +1230,8 @@ class MainWindow(QMainWindow):
 
     # ---------- refresh ----------
     def refresh_folder_table(self):
+        preserve_path = self.current_folder["path"] if self.current_folder else None
+        self.folders_table.blockSignals(True)
         query = self.search.text().strip().lower()
         items = []
         for x in self.registry:
@@ -1280,6 +1282,9 @@ class MainWindow(QMainWindow):
             self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
 
         self.folders_table.repaint()
+        self.folders_table.blockSignals(False)
+        if preserve_path:
+            self.select_folder_in_table(preserve_path)
 
     def refresh_category_tree(self):
         self.category_tree.clear()
