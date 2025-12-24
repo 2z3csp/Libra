@@ -417,6 +417,20 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
                 docs[doc_key]["current_rev"] = parse_rev_from_filename(fn)[2]
                 changed = True
 
+    # Remove docs whose current file no longer exists and are not present in scan
+    stale_keys = []
+    for doc_key, info in docs.items():
+        cur_fn = info.get("current_file", "") if isinstance(info, dict) else ""
+        if not cur_fn:
+            stale_keys.append(doc_key)
+            continue
+        if cur_fn not in files and doc_key not in latest_by_doc:
+            stale_keys.append(doc_key)
+    if stale_keys:
+        for key in stale_keys:
+            docs.pop(key, None)
+        changed = True
+
     meta["documents"] = docs
     if changed:
         save_meta(folder_path, meta)
@@ -1007,6 +1021,7 @@ class MainWindow(QMainWindow):
         self.watch_started_at: Optional[dt.datetime] = None
         self.current_user = user_name()
 
+        self.startup_rescan()
         self.refresh_folder_table()
         self.refresh_category_tree()
 
@@ -1105,7 +1120,7 @@ class MainWindow(QMainWindow):
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
             return False
-        meta = load_meta(folder_path)
+        meta, _rows = scan_folder(folder_path)
         docs = meta.get("documents", {})
         if not isinstance(docs, dict):
             return False
@@ -1348,6 +1363,7 @@ class MainWindow(QMainWindow):
 
     def refresh_files_table(self):
         self.files_table.blockSignals(True)
+        self.files_table.setUpdatesEnabled(False)
         selected_doc_key = None
         selected_index = self.selected_file_index()
         if 0 <= selected_index < len(self.current_file_rows):
@@ -1358,12 +1374,14 @@ class MainWindow(QMainWindow):
 
         if not self.current_folder:
             self.files_table.blockSignals(False)
+            self.files_table.setUpdatesEnabled(True)
             return
 
         folder_path = self.current_folder["path"]
         if not os.path.isdir(folder_path):
             self.warn("登録フォルダが見つかりません。パスを確認してください。")
             self.files_table.blockSignals(False)
+            self.files_table.setUpdatesEnabled(True)
             return
 
         meta, rows = scan_folder(folder_path)
@@ -1397,6 +1415,7 @@ class MainWindow(QMainWindow):
         if selected_doc_key:
             self.select_doc_key(selected_doc_key)
         self.files_table.blockSignals(False)
+        self.files_table.setUpdatesEnabled(True)
 
     def refresh_right_pane_for_doc(self, doc_key: str):
         self.memo_view.setPlainText("")
@@ -1655,6 +1674,12 @@ class MainWindow(QMainWindow):
         self.refresh_folder_table()
         self.refresh_files_table()
         self.refresh_category_tree()
+
+    def startup_rescan(self):
+        for item in self.registry:
+            path = item.get("path", "")
+            if path and os.path.isdir(path):
+                scan_folder(path)
 
     def on_options(self):
         dlg = OptionsDialog(self.memo_timeout_min, self)
