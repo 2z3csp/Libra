@@ -837,6 +837,7 @@ class ReplaceDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("差し替え")
         self.setMinimumWidth(640)
+        self.setAcceptDrops(True)
 
         self.target_filename = target_filename
 
@@ -853,6 +854,7 @@ class ReplaceDialog(QDialog):
         layout.addLayout(row)
 
         self.memo = QPlainTextEdit()
+        self.memo.setAcceptDrops(False)
         self.memo.setPlaceholderText("作業メモ（空欄可） 例：外注成果品差し替え、図面反映 等")
         layout.addWidget(self.memo, 1)
 
@@ -862,6 +864,30 @@ class ReplaceDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            event.ignore()
+            return
+        self.file_edit.setText(path)
+        event.acceptProposedAction()
 
     def pick_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "差し替えるファイルを選択")
