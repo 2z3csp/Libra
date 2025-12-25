@@ -637,18 +637,12 @@ class BatchPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
 
-        max_depth = max((entry.get("depth", 0) for entry in items), default=0)
-        self.indent_columns = max_depth + 1
-        column_count = 3 + max_depth + 1
-        headers = ["取込", "階層", "登録名"] + [""] * max_depth + ["フォルダパス"]
-
-        self.table = QTableWidget(0, column_count)
-        self.table.setHorizontalHeaderLabels(headers)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["取込", "階層", "登録名", "フォルダパス"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        for col in range(2, 2 + self.indent_columns):
-            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(column_count - 1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         layout.addWidget(self.table, 1)
 
@@ -665,14 +659,13 @@ class BatchPreviewDialog(QDialog):
             it_depth.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 1, it_depth)
 
-            name_col = 2 + int(entry.get("depth", 0))
             it_name = QTableWidgetItem(entry.get("name", ""))
             it_name.setData(Qt.UserRole, entry)
-            self.table.setItem(row, name_col, it_name)
+            self.table.setItem(row, 2, it_name)
 
             it_path = QTableWidgetItem(entry.get("path", ""))
             it_path.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, column_count - 1, it_path)
+            self.table.setItem(row, 3, it_path)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("取り込む")
@@ -683,23 +676,16 @@ class BatchPreviewDialog(QDialog):
 
     def selected_items(self) -> List[Dict[str, Any]]:
         selected: List[Dict[str, Any]] = []
-        name_columns = range(2, 2 + self.indent_columns)
         for row in range(self.table.rowCount()):
             check_item = self.table.item(row, 0)
             if not check_item:
                 continue
             if check_item.checkState() != Qt.Checked:
                 continue
-            name_item = None
-            entry = {}
-            for col in name_columns:
-                item = self.table.item(row, col)
-                if item and item.data(Qt.UserRole):
-                    name_item = item
-                    entry = item.data(Qt.UserRole) or {}
-                    break
+            name_item = self.table.item(row, 2)
             if not name_item:
                 continue
+            entry = name_item.data(Qt.UserRole) or {}
             if not isinstance(entry, dict):
                 continue
             name = name_item.text().strip()
