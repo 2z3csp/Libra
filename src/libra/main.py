@@ -637,9 +637,10 @@ class BatchPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
 
-        self.indent_columns = max(1, max((entry.get("depth", 0) for entry in items), default=0) + 1)
-        column_count = 2 + self.indent_columns + 1
-        headers = ["取込", "階層", "登録名"] + [""] * (self.indent_columns - 1) + ["フォルダパス"]
+        max_depth = max((entry.get("depth", 0) for entry in items), default=0)
+        self.indent_columns = max_depth + 1
+        column_count = 3 + max_depth + 1
+        headers = ["取込", "階層", "登録名"] + [""] * max_depth + ["フォルダパス"]
 
         self.table = QTableWidget(0, column_count)
         self.table.setHorizontalHeaderLabels(headers)
