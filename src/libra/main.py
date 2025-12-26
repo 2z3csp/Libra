@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QSpinBox,
     QRadioButton,
+    QCheckBox,
 )
 
 REV_RE = re.compile(
@@ -151,6 +152,11 @@ def load_settings() -> Dict[str, Any]:
         "memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN,
         "category_order": {"categories": {}, "folder": {}},
         "archived_categories": [],
+        "ignore_types": {
+            "shortcut": True,
+            "bak": True,
+            "log": True,
+        },
     }
     if not os.path.exists(SETTINGS_PATH):
         return defaults
@@ -350,7 +356,35 @@ def should_select_minor(latest: Tuple[int, int, int], candidate: Tuple[int, int,
     return False
 
 
-def safe_list_files(folder_path: str) -> List[str]:
+def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    defaults = {
+        "shortcut": True,
+        "bak": True,
+        "log": True,
+    }
+    if not isinstance(ignore_types, dict):
+        return defaults
+    merged = defaults.copy()
+    for key in defaults.keys():
+        if key in ignore_types:
+            merged[key] = bool(ignore_types[key])
+    return merged
+
+
+def should_ignore_file(filename: str, ignore_types: Dict[str, bool]) -> bool:
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+    if ignore_types.get("shortcut") and ext == ".lnk":
+        return True
+    if ignore_types.get("bak") and ext == ".bak":
+        return True
+    if ignore_types.get("log") and ext == ".log":
+        return True
+    return False
+
+
+def safe_list_files(folder_path: str, ignore_types: Optional[Dict[str, Any]] = None) -> List[str]:
+    ignore_flags = normalize_ignore_types(ignore_types)
     files = []
     try:
         for name in os.listdir(folder_path):
@@ -363,6 +397,8 @@ def safe_list_files(folder_path: str) -> List[str]:
             if name.lower() == META_FILENAME.lower():
                 continue
             if TEMP_FILE_RE.match(name):
+                continue
+            if should_ignore_file(name, ignore_flags):
                 continue
             files.append(name)
     except Exception:
@@ -418,14 +454,17 @@ class CategoryTreeWidget(QTreeWidget):
         self.order_changed.emit()
 
 
-def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
+def scan_folder(
+    folder_path: str,
+    ignore_types: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], List[FileRow]]:
     """
     Reads meta if exists and also scans real files.
     Returns (meta, file_rows_for_view).
     """
     meta = load_meta(folder_path)
     docs: Dict[str, Any] = meta.get("documents", {})
-    files = safe_list_files(folder_path)
+    files = safe_list_files(folder_path, ignore_types)
 
     # Build latest candidate per doc_key from filesystem (in case meta is missing/outdated)
     latest_by_doc: Dict[str, Tuple[Optional[Tuple[int, int, int, int]], str]] = {}
@@ -1160,7 +1199,12 @@ class ReplaceDialog(QDialog):
 
 
 class OptionsDialog(QDialog):
-    def __init__(self, timeout_min: int, parent: QWidget | None = None):
+    def __init__(
+        self,
+        timeout_min: int,
+        ignore_types: Optional[Dict[str, Any]] = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("オプション")
         self.setMinimumWidth(360)
@@ -1173,6 +1217,20 @@ class OptionsDialog(QDialog):
         form.addRow("メモ入力タイムアウト（分）", self.timeout_spin)
         layout.addLayout(form)
 
+        ignore_flags = normalize_ignore_types(ignore_types)
+        ignore_group = QGroupBox("無視するファイル種類")
+        ignore_layout = QVBoxLayout(ignore_group)
+        self.ignore_shortcut = QCheckBox("ショートカット（.lnk）")
+        self.ignore_shortcut.setChecked(ignore_flags.get("shortcut", False))
+        ignore_layout.addWidget(self.ignore_shortcut)
+        self.ignore_bak = QCheckBox(".bak")
+        self.ignore_bak.setChecked(ignore_flags.get("bak", False))
+        ignore_layout.addWidget(self.ignore_bak)
+        self.ignore_log = QCheckBox(".log")
+        self.ignore_log.setChecked(ignore_flags.get("log", False))
+        ignore_layout.addWidget(self.ignore_log)
+        layout.addWidget(ignore_group)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存")
         buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
@@ -1182,6 +1240,13 @@ class OptionsDialog(QDialog):
 
     def get_timeout_min(self) -> int:
         return int(self.timeout_spin.value())
+
+    def get_ignore_types(self) -> Dict[str, bool]:
+        return {
+            "shortcut": self.ignore_shortcut.isChecked(),
+            "bak": self.ignore_bak.isChecked(),
+            "log": self.ignore_log.isChecked(),
+        }
 
 
 class MainWindow(QMainWindow):
@@ -1194,6 +1259,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.user_checks = load_user_checks()
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
+        self.ignore_types = normalize_ignore_types(self.settings.get("ignore_types"))
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1573,7 +1639,7 @@ class MainWindow(QMainWindow):
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
             return False
-        meta, _rows = scan_folder(folder_path)
+        meta, _rows = scan_folder(folder_path, self.ignore_types)
         docs = meta.get("documents", {})
         if not isinstance(docs, dict):
             return False
@@ -1741,7 +1807,7 @@ class MainWindow(QMainWindow):
 
             if os.path.isdir(path):
                 try:
-                    files = safe_list_files(path)
+                    files = safe_list_files(path, self.ignore_types)
                     latest_mtime = None
                     for filename in files:
                         file_path = os.path.join(path, filename)
@@ -1909,7 +1975,7 @@ class MainWindow(QMainWindow):
             self.files_table.setUpdatesEnabled(True)
             return
 
-        meta, rows = scan_folder(folder_path)
+        meta, rows = scan_folder(folder_path, self.ignore_types)
         self.current_meta = meta
         self.current_file_rows = rows
 
@@ -2269,15 +2335,19 @@ class MainWindow(QMainWindow):
         for item in self.registry:
             path = item.get("path", "")
             if path and os.path.isdir(path):
-                scan_folder(path)
+                scan_folder(path, self.ignore_types)
 
     def on_options(self):
-        dlg = OptionsDialog(self.memo_timeout_min, self)
+        dlg = OptionsDialog(self.memo_timeout_min, self.ignore_types, self)
         if dlg.exec() != QDialog.Accepted:
             return
         self.memo_timeout_min = dlg.get_timeout_min()
+        self.ignore_types = normalize_ignore_types(dlg.get_ignore_types())
         self.settings["memo_timeout_min"] = self.memo_timeout_min
+        self.settings["ignore_types"] = self.ignore_types
         save_settings(self.settings)
+        self.refresh_folder_table()
+        self.refresh_files_table()
         self.info("設定を保存しました。")
 
     def on_archive(self):
