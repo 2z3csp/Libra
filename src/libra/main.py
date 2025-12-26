@@ -2212,14 +2212,11 @@ class MainWindow(QMainWindow):
         elif action == act_register_as_category:
             root_path = data.get("path")
             category_path = data.get("category_path", [])
-            folder_name = item.text(0).strip()
             if not isinstance(root_path, str) or not root_path:
                 return
             if not isinstance(category_path, list):
                 category_path = []
-            if not folder_name:
-                return
-            base_categories = normalize_category_path(category_path + [folder_name])
+            base_categories = normalize_category_path(category_path)
             self.run_batch_register(root_path, 1, base_categories=base_categories)
         elif action == act_delete:
             path = data.get("path")
