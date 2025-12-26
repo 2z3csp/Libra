@@ -9,7 +9,7 @@
 # Notes:
 # - Keeps your existing folder structure: "latest files" live in the registered folder root.
 # - Uses "_History" folder under the registered folder.
-# - Stores metadata under "_Meta" folder under the registered folder.
+# - Stores metadata as a hidden ".libra_meta.json" file under the registered folder.
 #
 # Tested targets: Windows, OneDrive local sync folder.
 
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QSpinBox,
     QRadioButton,
+    QCheckBox,
 )
 
 REV_RE = re.compile(
@@ -63,6 +64,9 @@ REV_RE = re.compile(
 )
 
 TEMP_FILE_RE = re.compile(r"^~\$")  # Office temporary files
+META_FILENAME = ".libra_meta.json"
+LEGACY_META_DIR = "_Meta"
+LEGACY_META_FILENAME = "docmeta.json"
 
 
 def now_iso() -> str:
@@ -89,9 +93,33 @@ SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
 USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
+CATEGORY_PATH_SEP = "\u001f"
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "asset")
+APP_ICON_PATH = os.path.join(ASSET_DIR, "icon.xpm")
 
 
-def load_registry() -> List[Dict[str, str]]:
+def load_app_icon() -> Optional[QIcon]:
+    if os.path.exists(APP_ICON_PATH):
+        return QIcon(APP_ICON_PATH)
+    return None
+
+
+def normalize_category_path(values: List[str]) -> List[str]:
+    return [value.strip() for value in values if value.strip()]
+
+
+def categories_from_item(item: Dict[str, Any]) -> List[str]:
+    raw_categories = item.get("categories")
+    if isinstance(raw_categories, list):
+        return normalize_category_path([str(x) for x in raw_categories])
+    legacy = [
+        str(item.get("main_category", "")),
+        str(item.get("sub_category", "")),
+    ]
+    return normalize_category_path(legacy)
+
+
+def load_registry() -> List[Dict[str, Any]]:
     if not os.path.exists(REGISTRY_PATH):
         return []
     try:
@@ -102,11 +130,11 @@ def load_registry() -> List[Dict[str, str]]:
             out = []
             for x in data:
                 if isinstance(x, dict) and "name" in x and "path" in x:
+                    categories = categories_from_item(x)
                     out.append({
                         "name": str(x["name"]),
                         "path": str(x["path"]),
-                        "main_category": str(x.get("main_category", "")),
-                        "sub_category": str(x.get("sub_category", "")),
+                        "categories": categories,
                     })
             return out
         return []
@@ -114,13 +142,22 @@ def load_registry() -> List[Dict[str, str]]:
         return []
 
 
-def save_registry(items: List[Dict[str, str]]) -> None:
+def save_registry(items: List[Dict[str, Any]]) -> None:
     with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
 def load_settings() -> Dict[str, Any]:
-    defaults = {"memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN, "category_order": {"main": [], "sub": {}, "folder": {}}}
+    defaults = {
+        "memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN,
+        "category_order": {"categories": {}, "folder": {}},
+        "archived_categories": [],
+        "ignore_types": {
+            "shortcut": True,
+            "bak": True,
+            "log": True,
+        },
+    }
     if not os.path.exists(SETTINGS_PATH):
         return defaults
     try:
@@ -160,26 +197,44 @@ def save_user_checks(checks: Dict[str, Dict[str, bool]]) -> None:
         json.dump({"folders": checks}, f, ensure_ascii=False, indent=2)
 
 
-def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
-    """
-    Returns (history_dir, meta_dir)
-    """
+def ensure_history_dir(folder_path: str) -> str:
     history_dir = os.path.join(folder_path, "_History")
-    meta_dir = os.path.join(folder_path, "_Meta")
     os.makedirs(history_dir, exist_ok=True)
-    os.makedirs(meta_dir, exist_ok=True)
-    return history_dir, meta_dir
+    return history_dir
+
+
+def legacy_meta_path_for_folder(folder_path: str) -> str:
+    return os.path.join(folder_path, LEGACY_META_DIR, LEGACY_META_FILENAME)
 
 
 def meta_path_for_folder(folder_path: str) -> str:
-    _, meta_dir = ensure_folder_structure(folder_path)
-    return os.path.join(meta_dir, "docmeta.json")
+    return os.path.join(folder_path, META_FILENAME)
+
+
+def set_hidden_on_windows(path: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        FILE_ATTRIBUTE_HIDDEN = 0x02
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(path)
+        if attrs == -1:
+            return
+        if attrs & FILE_ATTRIBUTE_HIDDEN:
+            return
+        ctypes.windll.kernel32.SetFileAttributesW(path, attrs | FILE_ATTRIBUTE_HIDDEN)
+    except Exception:
+        return
 
 
 def load_meta(folder_path: str) -> Dict[str, Any]:
     p = meta_path_for_folder(folder_path)
+    legacy_path = legacy_meta_path_for_folder(folder_path)
     if not os.path.exists(p):
-        return {"documents": {}}
+        if not os.path.exists(legacy_path):
+            return {"documents": {}}
+        p = legacy_path
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -196,6 +251,7 @@ def save_meta(folder_path: str, meta: Dict[str, Any]) -> None:
     p = meta_path_for_folder(folder_path)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+    set_hidden_on_windows(p)
 
 
 def split_name_ext(filename: str) -> Tuple[str, str]:
@@ -300,17 +356,49 @@ def should_select_minor(latest: Tuple[int, int, int], candidate: Tuple[int, int,
     return False
 
 
-def safe_list_files(folder_path: str) -> List[str]:
+def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    defaults = {
+        "shortcut": True,
+        "bak": True,
+        "log": True,
+    }
+    if not isinstance(ignore_types, dict):
+        return defaults
+    merged = defaults.copy()
+    for key in defaults.keys():
+        if key in ignore_types:
+            merged[key] = bool(ignore_types[key])
+    return merged
+
+
+def should_ignore_file(filename: str, ignore_types: Dict[str, bool]) -> bool:
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+    if ignore_types.get("shortcut") and ext == ".lnk":
+        return True
+    if ignore_types.get("bak") and ext == ".bak":
+        return True
+    if ignore_types.get("log") and ext == ".log":
+        return True
+    return False
+
+
+def safe_list_files(folder_path: str, ignore_types: Optional[Dict[str, Any]] = None) -> List[str]:
+    ignore_flags = normalize_ignore_types(ignore_types)
     files = []
     try:
         for name in os.listdir(folder_path):
             full = os.path.join(folder_path, name)
             if os.path.isdir(full):
                 # skip management folders
-                if name.lower() in {"_history", "_meta"}:
+                if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
                     continue
                 continue
+            if name.lower() == META_FILENAME.lower():
+                continue
             if TEMP_FILE_RE.match(name):
+                continue
+            if should_ignore_file(name, ignore_flags):
                 continue
             files.append(name)
     except Exception:
@@ -366,14 +454,17 @@ class CategoryTreeWidget(QTreeWidget):
         self.order_changed.emit()
 
 
-def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
+def scan_folder(
+    folder_path: str,
+    ignore_types: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], List[FileRow]]:
     """
     Reads meta if exists and also scans real files.
     Returns (meta, file_rows_for_view).
     """
     meta = load_meta(folder_path)
     docs: Dict[str, Any] = meta.get("documents", {})
-    files = safe_list_files(folder_path)
+    files = safe_list_files(folder_path, ignore_types)
 
     # Build latest candidate per doc_key from filesystem (in case meta is missing/outdated)
     latest_by_doc: Dict[str, Tuple[Optional[Tuple[int, int, int, int]], str]] = {}
@@ -462,10 +553,8 @@ class RegisterDialog(QDialog):
         parent: QWidget | None = None,
         initial_name: str = "",
         initial_path: str = "",
-        initial_main_category: str = "",
-        initial_sub_category: str = "",
-        main_category_options: Optional[List[str]] = None,
-        sub_category_options: Optional[List[str]] = None,
+        initial_categories: Optional[List[str]] = None,
+        category_options: Optional[List[List[str]]] = None,
         ok_label: str = "登録",
     ):
         super().__init__(parent)
@@ -484,35 +573,35 @@ class RegisterDialog(QDialog):
         path_row.addWidget(self.path_btn)
 
         self.name_edit = QLineEdit()
-        self.main_category_edit = QComboBox()
-        self.main_category_edit.setEditable(True)
-        self.sub_category_edit = QComboBox()
-        self.sub_category_edit.setEditable(True)
-        if self.main_category_edit.lineEdit():
-            self.main_category_edit.lineEdit().setPlaceholderText("例：案件　記入 or 選択")
-        if self.sub_category_edit.lineEdit():
-            self.sub_category_edit.lineEdit().setPlaceholderText("例：図面　記入 or 選択")
-
-        if main_category_options:
-            self.main_category_edit.addItems(main_category_options)
-        if sub_category_options:
-            self.sub_category_edit.addItems(sub_category_options)
-        self.main_category_edit.setCurrentIndex(-1)
-        self.sub_category_edit.setCurrentIndex(-1)
+        self.category_edits: List[QComboBox] = []
+        self.category_form = QFormLayout()
+        self.category_form.setContentsMargins(0, 0, 0, 0)
+        self.category_options = category_options or []
+        self.initial_categories = initial_categories or []
+        self.add_category_button = QPushButton("+")
+        self.add_category_button.setToolTip("下の階層のカテゴリを追加")
+        self.add_category_button.clicked.connect(self.add_category_row)
 
         form.addRow("登録フォルダパス", path_row)
         form.addRow("登録名", self.name_edit)
-        form.addRow("メインカテゴリ", self.main_category_edit)
-        form.addRow("サブカテゴリ", self.sub_category_edit)
+        category_box = QVBoxLayout()
+        category_box.addLayout(self.category_form)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.add_category_button)
+        category_box.addLayout(button_row)
+        form.addRow("カテゴリ階層", category_box)
 
         if initial_path:
             self.path_edit.setText(initial_path)
         if initial_name:
             self.name_edit.setText(initial_name)
-        if initial_main_category:
-            self.main_category_edit.setCurrentText(initial_main_category)
-        if initial_sub_category:
-            self.sub_category_edit.setCurrentText(initial_sub_category)
+        initial_levels = max(2, len(self.initial_categories) or 0)
+        for _ in range(initial_levels):
+            self.add_category_row()
+        for idx, value in enumerate(self.initial_categories):
+            if idx < len(self.category_edits):
+                self.category_edits[idx].setCurrentText(value)
 
         layout.addLayout(form)
 
@@ -530,13 +619,224 @@ class RegisterDialog(QDialog):
             if not self.name_edit.text().strip():
                 self.name_edit.setText(os.path.basename(path))
 
-    def get_values(self) -> Tuple[str, str, str, str]:
+    def add_category_row(self):
+        level = len(self.category_edits) + 1
+        combo = QComboBox()
+        combo.setEditable(True)
+        placeholder = f"例：カテゴリ{level}　記入 or 選択"
+        if combo.lineEdit():
+            combo.lineEdit().setPlaceholderText(placeholder)
+        if level - 1 < len(self.category_options):
+            combo.addItems(self.category_options[level - 1])
+        combo.setCurrentIndex(-1)
+        self.category_edits.append(combo)
+        self.category_form.addRow(f"カテゴリ階層{level}", combo)
+
+    def get_values(self) -> Tuple[str, str, List[str]]:
+        categories = []
+        for edit in self.category_edits:
+            value = edit.currentText().strip()
+            if not value:
+                break
+            categories.append(value)
         return (
             self.name_edit.text().strip(),
             self.path_edit.text().strip(),
-            self.main_category_edit.currentText().strip(),
-            self.sub_category_edit.currentText().strip(),
+            categories,
         )
+
+
+class BatchRegisterDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("一括登録")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.path_edit = QLineEdit()
+        self.path_btn = QPushButton("参照...")
+        self.path_btn.clicked.connect(self.pick_folder)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.path_btn)
+
+        self.depth_spin = QSpinBox()
+        self.depth_spin.setRange(0, 10)
+        self.depth_spin.setValue(2)
+
+        form.addRow("対象ディレクトリ", path_row)
+        form.addRow("取得階層", self.depth_spin)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("OK")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def pick_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "登録するディレクトリを選択")
+        if path:
+            self.path_edit.setText(path)
+
+    def get_path(self) -> str:
+        return self.path_edit.text().strip()
+
+    def get_depth(self) -> int:
+        return int(self.depth_spin.value())
+
+
+class BatchPreviewDialog(QDialog):
+    def __init__(self, items: List[Dict[str, Any]], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("一括登録プレビュー")
+        self.setMinimumWidth(720)
+        self.setMinimumHeight(460)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["取込", "登録名", "フォルダパス"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.tree, 1)
+
+        nodes: Dict[Tuple[str, ...], QTreeWidgetItem] = {}
+        for entry in items:
+            parts = entry.get("rel_parts", [])
+            if not isinstance(parts, list):
+                continue
+            parent_item: Optional[QTreeWidgetItem] = None
+            for depth, part in enumerate(parts):
+                key = tuple(parts[: depth + 1])
+                item = nodes.get(key)
+                if not item:
+                    item = QTreeWidgetItem([ "", part, "" ])
+                    item.setFlags(item.flags() | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, Qt.Checked)
+                    if parent_item is None:
+                        self.tree.addTopLevelItem(item)
+                    else:
+                        parent_item.addChild(item)
+                    nodes[key] = item
+                parent_item = item
+
+            if parent_item is None:
+                parent_item = QTreeWidgetItem([ "", entry.get("name", ""), entry.get("path", "") ])
+                self.tree.addTopLevelItem(parent_item)
+            parent_item.setText(1, entry.get("name", ""))
+            parent_item.setText(2, entry.get("path", ""))
+            parent_item.setData(0, Qt.UserRole, entry)
+            parent_item.setFlags(parent_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            parent_item.setCheckState(0, Qt.Checked)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("取り込む")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_items(self) -> List[Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        def walk(item: QTreeWidgetItem, ancestor_checked: bool):
+            current_checked = ancestor_checked and item.checkState(0) == Qt.Checked
+            entry = item.data(0, Qt.UserRole)
+            if entry and isinstance(entry, dict):
+                if current_checked:
+                    name = item.text(1).strip()
+                    path = entry.get("path")
+                    categories = entry.get("categories")
+                    if name and path and categories:
+                        selected.append({
+                            "name": name,
+                            "path": path,
+                            "categories": categories,
+                        })
+            for i in range(item.childCount()):
+                walk(item.child(i), current_checked)
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i), True)
+        return selected
+
+
+class ArchiveDialog(QDialog):
+    def __init__(self, entries: List[Dict[str, Any]], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("アーカイブ")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(360)
+        self.selected_action: Optional[str] = None
+
+        layout = QVBoxLayout(self)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["カテゴリ階層", "件数"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table, 1)
+
+        for entry in entries:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            path_text = entry.get("label", "")
+            count = entry.get("count", 0)
+            it_path = QTableWidgetItem(path_text)
+            it_path.setData(Qt.UserRole, entry.get("path", []))
+            self.table.setItem(row, 0, it_path)
+            self.table.setItem(row, 1, QTableWidgetItem(str(count)))
+
+        btn_row = QHBoxLayout()
+        self.btn_restore = QPushButton("復帰")
+        self.btn_delete = QPushButton("削除")
+        self.btn_cancel = QPushButton("キャンセル")
+        btn_row.addWidget(self.btn_restore)
+        btn_row.addWidget(self.btn_delete)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.btn_restore.clicked.connect(self.on_restore)
+        self.btn_delete.clicked.connect(self.on_delete)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def selected_path(self) -> List[str]:
+        row = self.table.currentRow()
+        if row < 0:
+            return []
+        item = self.table.item(row, 0)
+        if not item:
+            return []
+        return item.data(Qt.UserRole) or []
+
+    def ensure_selection(self) -> bool:
+        if self.table.currentRow() < 0:
+            QMessageBox.warning(self, "注意", "対象を選択してください。")
+            return False
+        return True
+
+    def on_restore(self):
+        if not self.ensure_selection():
+            return
+        self.selected_action = "restore"
+        self.accept()
+
+    def on_delete(self):
+        if not self.ensure_selection():
+            return
+        self.selected_action = "delete"
+        self.accept()
 
 
 class VersionSelectDialog(QDialog):
@@ -899,7 +1199,12 @@ class ReplaceDialog(QDialog):
 
 
 class OptionsDialog(QDialog):
-    def __init__(self, timeout_min: int, parent: QWidget | None = None):
+    def __init__(
+        self,
+        timeout_min: int,
+        ignore_types: Optional[Dict[str, Any]] = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("オプション")
         self.setMinimumWidth(360)
@@ -912,6 +1217,20 @@ class OptionsDialog(QDialog):
         form.addRow("メモ入力タイムアウト（分）", self.timeout_spin)
         layout.addLayout(form)
 
+        ignore_flags = normalize_ignore_types(ignore_types)
+        ignore_group = QGroupBox("無視するファイル種類")
+        ignore_layout = QVBoxLayout(ignore_group)
+        self.ignore_shortcut = QCheckBox("ショートカット（.lnk）")
+        self.ignore_shortcut.setChecked(ignore_flags.get("shortcut", False))
+        ignore_layout.addWidget(self.ignore_shortcut)
+        self.ignore_bak = QCheckBox(".bak")
+        self.ignore_bak.setChecked(ignore_flags.get("bak", False))
+        ignore_layout.addWidget(self.ignore_bak)
+        self.ignore_log = QCheckBox(".log")
+        self.ignore_log.setChecked(ignore_flags.get("log", False))
+        ignore_layout.addWidget(self.ignore_log)
+        layout.addWidget(ignore_group)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存")
         buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
@@ -921,6 +1240,13 @@ class OptionsDialog(QDialog):
 
     def get_timeout_min(self) -> int:
         return int(self.timeout_spin.value())
+
+    def get_ignore_types(self) -> Dict[str, bool]:
+        return {
+            "shortcut": self.ignore_shortcut.isChecked(),
+            "bak": self.ignore_bak.isChecked(),
+            "log": self.ignore_log.isChecked(),
+        }
 
 
 class MainWindow(QMainWindow):
@@ -933,6 +1259,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.user_checks = load_user_checks()
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
+        self.ignore_types = normalize_ignore_types(self.settings.get("ignore_types"))
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -944,6 +1271,9 @@ class MainWindow(QMainWindow):
         act_options = QAction("オプション", self)
         act_options.triggered.connect(self.on_options)
         toolbar.addAction(act_options)
+        act_archive = QAction("アーカイブ", self)
+        act_archive.triggered.connect(self.on_archive)
+        toolbar.addAction(act_archive)
 
         # Top controls
         top = QHBoxLayout()
@@ -951,8 +1281,11 @@ class MainWindow(QMainWindow):
         self.search.setPlaceholderText("検索（登録名でフィルタ）")
         self.search.textChanged.connect(self.refresh_folder_table)
 
-        btn_register = QPushButton("登録")
+        btn_register = QPushButton("個別登録")
         btn_register.clicked.connect(self.on_register)
+
+        btn_batch_register = QPushButton("一括登録")
+        btn_batch_register.clicked.connect(self.on_batch_register)
 
         btn_update = QPushButton("更新")
         btn_update.clicked.connect(self.on_update)
@@ -965,6 +1298,7 @@ class MainWindow(QMainWindow):
 
         top.addWidget(self.search, 1)
         top.addWidget(btn_register)
+        top.addWidget(btn_batch_register)
         top.addWidget(btn_update)
         top.addWidget(btn_replace)
         top.addWidget(btn_rescan)
@@ -988,6 +1322,7 @@ class MainWindow(QMainWindow):
         self.category_tree.order_changed.connect(self.on_category_tree_order_changed)
         self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
         self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
+        self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
         tree_layout.addWidget(self.category_tree)
@@ -1068,14 +1403,15 @@ class MainWindow(QMainWindow):
         self.current_folder: Optional[Dict[str, str]] = None
         self.current_meta: Optional[Dict[str, Any]] = None
         self.current_file_rows: List[FileRow] = []
-        self.selected_main_category: str = ""
-        self.selected_sub_category: str = ""
+        self.selected_category_path: List[str] = []
         self.watch_timer = None
         self.watch_target_path = ""
         self.watch_folder_path = ""
         self.watch_doc_key = ""
         self.watch_started_at: Optional[dt.datetime] = None
         self.current_user = user_name()
+        self._category_tree_refreshing = False
+        self._category_tree_refresh_pending = False
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1105,29 +1441,199 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.warn(f"エクスプローラーで開けませんでした: {e}")
 
-    def category_fallback(self, value: str, fallback: str) -> str:
-        return value.strip() or fallback
+    def category_path_key(self, path: List[str]) -> str:
+        return CATEGORY_PATH_SEP.join(path)
 
-    def category_options(self) -> Tuple[List[str], List[str]]:
-        main_categories = {
-            self.category_fallback(item.get("main_category", ""), "未分類")
-            for item in self.registry
-        }
-        sub_categories = {
-            self.category_fallback(item.get("sub_category", ""), "未分類")
-            for item in self.registry
-        }
-        return sorted(main_categories), sorted(sub_categories)
+    def category_path_for_item(self, item: Dict[str, Any]) -> List[str]:
+        categories = categories_from_item(item)
+        if categories:
+            return categories
+        return ["未分類"]
+
+    def archived_categories(self) -> List[List[str]]:
+        data = self.settings.get("archived_categories", [])
+        archived: List[List[str]] = []
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, list):
+                    path = normalize_category_path([str(x) for x in entry])
+                elif isinstance(entry, str):
+                    path = normalize_category_path(entry.split(CATEGORY_PATH_SEP))
+                else:
+                    continue
+                if path:
+                    archived.append(path)
+        return archived
+
+    def save_archived_categories(self, archived: List[List[str]]) -> None:
+        self.settings["archived_categories"] = archived
+        save_settings(self.settings)
+
+    def is_archived_path(self, categories: List[str]) -> bool:
+        if not categories:
+            return False
+        for archived in self.archived_categories():
+            if categories[:len(archived)] == archived:
+                return True
+        return False
+
+    def archive_category_path(self, path: List[str]) -> bool:
+        if not path:
+            return False
+        archived = self.archived_categories()
+        for entry in archived:
+            if path[:len(entry)] == entry:
+                return False
+        archived = [entry for entry in archived if entry[:len(path)] != path]
+        archived.append(path)
+        self.save_archived_categories(archived)
+        return True
+
+    def unarchive_category_path(self, path: List[str]) -> None:
+        archived = [entry for entry in self.archived_categories() if entry != path]
+        self.save_archived_categories(archived)
+
+    def remove_archived_under_path(self, path: List[str]) -> None:
+        archived = [
+            entry for entry in self.archived_categories()
+            if entry[:len(path)] != path
+        ]
+        self.save_archived_categories(archived)
+
+    def root_category_name(self, root_path: str) -> str:
+        base = os.path.basename(os.path.normpath(root_path))
+        if base:
+            return base
+        drive, _ = os.path.splitdrive(root_path)
+        return drive or root_path
+
+    def batch_register_items(
+        self,
+        root_path: str,
+        max_depth: int,
+        base_categories: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        base_categories = base_categories or []
+        root_category = self.root_category_name(root_path)
+        registered_paths = {os.path.normcase(item["path"]) for item in self.registry}
+        items: List[Dict[str, Any]] = []
+        for dirpath, dirnames, _filenames in os.walk(root_path):
+            dirnames[:] = [d for d in dirnames if d.lower() not in {"_history", LEGACY_META_DIR.lower()}]
+            dirnames.sort(key=str.casefold)
+            rel = os.path.relpath(dirpath, root_path)
+            depth = 0 if rel == "." else len(rel.split(os.sep))
+            if depth > max_depth:
+                dirnames[:] = []
+                continue
+            if depth >= max_depth:
+                dirnames[:] = []
+            if dirnames and depth < max_depth:
+                continue
+            if os.path.normcase(dirpath) in registered_paths:
+                continue
+            rel_parts = [] if rel == "." else rel.split(os.sep)
+            if rel_parts:
+                folder_name = rel_parts[-1]
+                category_parts = base_categories + [root_category] + rel_parts[:-1]
+            else:
+                folder_name = root_category
+                category_parts = base_categories + [root_category]
+            categories = normalize_category_path(category_parts)
+            items.append({
+                "name": folder_name,
+                "path": dirpath,
+                "categories": categories,
+                "depth": depth,
+                "rel_parts": rel_parts,
+            })
+        items.sort(key=lambda item: [part.casefold() for part in item.get("rel_parts", [])])
+        return items
+
+    def category_options(self) -> List[List[str]]:
+        levels: Dict[int, set[str]] = {}
+        for item in self.registry:
+            if self.is_archived_path(self.category_path_for_item(item)):
+                continue
+            categories = self.category_path_for_item(item)
+            for idx, name in enumerate(categories):
+                levels.setdefault(idx, set()).add(name)
+        if not levels:
+            return []
+        max_level = max(levels.keys())
+        return [sorted(levels.get(i, set())) for i in range(max_level + 1)]
 
     def category_order(self) -> Dict[str, Any]:
         order = self.settings.get("category_order")
         if not isinstance(order, dict):
-            order = {"main": [], "sub": {}, "folder": {}}
+            order = {"categories": {}, "folder": {}}
             self.settings["category_order"] = order
-        order.setdefault("main", [])
-        order.setdefault("sub", {})
+        if "main" in order or "sub" in order:
+            order = self.migrate_category_order(order)
+            self.settings["category_order"] = order
+        order.setdefault("categories", {})
         order.setdefault("folder", {})
         return order
+
+    def category_check_states(self) -> Dict[str, bool]:
+        checks = self.settings.get("category_check_states")
+        if not isinstance(checks, dict):
+            checks = {}
+            self.settings["category_check_states"] = checks
+        return checks
+
+    def folder_tree_check_states(self) -> Dict[str, bool]:
+        checks = self.settings.get("folder_tree_check_states")
+        if not isinstance(checks, dict):
+            checks = {}
+            self.settings["folder_tree_check_states"] = checks
+        return checks
+
+    def is_category_checked(self, path: List[str]) -> bool:
+        key = self.category_path_key(path)
+        return bool(self.category_check_states().get(key, True))
+
+    def is_folder_tree_checked(self, folder_path: str) -> bool:
+        key = self.folder_key(folder_path)
+        return bool(self.folder_tree_check_states().get(key, True))
+
+    def set_category_checked(self, path: List[str], checked: bool) -> None:
+        checks = self.category_check_states()
+        checks[self.category_path_key(path)] = checked
+        self.settings["category_check_states"] = checks
+        save_settings(self.settings)
+
+    def set_folder_tree_checked(self, folder_path: str, checked: bool) -> None:
+        checks = self.folder_tree_check_states()
+        checks[self.folder_key(folder_path)] = checked
+        self.settings["folder_tree_check_states"] = checks
+        save_settings(self.settings)
+
+    def is_category_highlight_enabled_for_path(self, path: List[str]) -> bool:
+        for depth in range(1, len(path) + 1):
+            if not self.is_category_checked(path[:depth]):
+                return False
+        return True
+
+    def migrate_category_order(self, legacy: Dict[str, Any]) -> Dict[str, Any]:
+        new_order: Dict[str, Any] = {"categories": {}, "folder": {}}
+        main_list = legacy.get("main", [])
+        if isinstance(main_list, list):
+            new_order["categories"][self.category_path_key([])] = list(main_list)
+        sub_map = legacy.get("sub", {})
+        if isinstance(sub_map, dict):
+            for main_name, sub_list in sub_map.items():
+                if isinstance(sub_list, list):
+                    new_order["categories"][self.category_path_key([str(main_name)])] = list(sub_list)
+        folder_map = legacy.get("folder", {})
+        if isinstance(folder_map, dict):
+            for main_name, sub_entries in folder_map.items():
+                if not isinstance(sub_entries, dict):
+                    continue
+                for sub_name, paths in sub_entries.items():
+                    if isinstance(paths, list):
+                        key = self.category_path_key([str(main_name), str(sub_name)])
+                        new_order["folder"][key] = list(paths)
+        return new_order
 
     def ordered_list(self, items: List[str], preferred: List[str]) -> List[str]:
         ordered = [x for x in preferred if x in items]
@@ -1136,7 +1642,7 @@ class MainWindow(QMainWindow):
                 ordered.append(x)
         return ordered
 
-    def folders_sorted_for_subcategory(self, folders: List[Dict[str, str]], order_paths: List[str]) -> List[Dict[str, str]]:
+    def folders_sorted_for_category(self, folders: List[Dict[str, str]], order_paths: List[str]) -> List[Dict[str, str]]:
         mapping = {f["path"]: f for f in folders}
         ordered = []
         for path in order_paths:
@@ -1176,7 +1682,7 @@ class MainWindow(QMainWindow):
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
             return False
-        meta, _rows = scan_folder(folder_path)
+        meta, _rows = scan_folder(folder_path, self.ignore_types)
         docs = meta.get("documents", {})
         if not isinstance(docs, dict):
             return False
@@ -1207,24 +1713,22 @@ class MainWindow(QMainWindow):
             self.warn("登録情報が見つかりません。")
             return
         item = self.registry[idx]
-        main_options, sub_options = self.category_options()
+        category_options = self.category_options()
 
         dlg = RegisterDialog(
             self,
             initial_name=item.get("name", ""),
             initial_path=item.get("path", ""),
-            initial_main_category=item.get("main_category", ""),
-            initial_sub_category=item.get("sub_category", ""),
-            main_category_options=main_options,
-            sub_category_options=sub_options,
+            initial_categories=self.category_path_for_item(item),
+            category_options=category_options,
             ok_label="更新",
         )
         if dlg.exec() != QDialog.Accepted:
             return
 
-        name, new_path, main_category, sub_category = dlg.get_values()
-        if not name or not new_path or not main_category or not sub_category:
-            self.warn("登録名・フォルダパス・メインカテゴリ・サブカテゴリを入力してください。")
+        name, new_path, categories = dlg.get_values()
+        if not name or not new_path or not categories:
+            self.warn("登録名・フォルダパス・カテゴリ階層1を入力してください。")
             return
         if not os.path.isdir(new_path):
             self.warn("フォルダが存在しません。")
@@ -1236,27 +1740,29 @@ class MainWindow(QMainWindow):
                 self.warn("このフォルダは既に登録されています。")
                 return
             new_history = os.path.join(new_path, "_History")
-            new_meta = os.path.join(new_path, "_Meta")
-            if os.path.exists(new_history) or os.path.exists(new_meta):
-                self.warn("移動先に _History または _Meta が既に存在します。更新をキャンセルしました。")
+            new_meta = meta_path_for_folder(new_path)
+            new_legacy_meta = legacy_meta_path_for_folder(new_path)
+            if os.path.exists(new_history) or os.path.exists(new_meta) or os.path.exists(new_legacy_meta):
+                self.warn("移動先に _History またはメタデータが既に存在します。更新をキャンセルしました。")
                 return
             old_history = os.path.join(old_path, "_History")
-            old_meta = os.path.join(old_path, "_Meta")
+            old_meta = meta_path_for_folder(old_path)
+            old_legacy_meta = legacy_meta_path_for_folder(old_path)
             try:
                 if os.path.exists(old_history):
                     shutil.move(old_history, new_history)
                 if os.path.exists(old_meta):
                     shutil.move(old_meta, new_meta)
+                elif os.path.exists(old_legacy_meta):
+                    os.makedirs(os.path.dirname(new_legacy_meta), exist_ok=True)
+                    shutil.move(old_legacy_meta, new_legacy_meta)
             except Exception as e:
-                self.warn(f"_History/_Meta の移動に失敗しました: {e}")
+                self.warn(f"_History/メタデータの移動に失敗しました: {e}")
                 return
-
-        ensure_folder_structure(new_path)
 
         item["name"] = name
         item["path"] = new_path
-        item["main_category"] = main_category
-        item["sub_category"] = sub_category
+        item["categories"] = categories
         self.registry[idx] = item
         save_registry(self.registry)
         self.refresh_folder_table()
@@ -1271,7 +1777,7 @@ class MainWindow(QMainWindow):
         if idx < 0:
             self.warn("登録情報が見つかりません。")
             return
-        if not self.ask("この登録を削除しますか？（_History/_Meta は削除しません）"):
+        if not self.ask("この登録を削除しますか？（_History/メタデータ は削除しません）"):
             return
         self.registry.pop(idx)
         save_registry(self.registry)
@@ -1284,6 +1790,39 @@ class MainWindow(QMainWindow):
         self.refresh_files_table()
         self.info("削除しました。")
 
+    def delete_category_hierarchy(self, path: List[str]) -> None:
+        if not path:
+            return
+        targets = [
+            item for item in self.registry
+            if self.category_path_for_item(item)[:len(path)] == path
+        ]
+        if not targets:
+            self.warn("削除できる登録がありません。")
+            return
+        if not self.ask(f"カテゴリ配下の登録 {len(targets)} 件を削除しますか？"):
+            return
+        target_paths = {item["path"] for item in targets}
+        self.registry = [item for item in self.registry if item["path"] not in target_paths]
+        self.remove_user_checks_for_paths(target_paths)
+        self.remove_archived_under_path(path)
+        save_registry(self.registry)
+        if self.current_folder and self.current_folder["path"] in target_paths:
+            self.current_folder = None
+            self.current_meta = None
+            self.current_file_rows = []
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.refresh_files_table()
+        self.info("削除しました。")
+
+    def remove_user_checks_for_paths(self, paths: set[str]) -> None:
+        for path in paths:
+            key = self.folder_key(path)
+            if key in self.user_checks:
+                self.user_checks.pop(key, None)
+        save_user_checks(self.user_checks)
+
     # ---------- refresh ----------
     def refresh_folder_table(self):
         preserve_path = self.current_folder["path"] if self.current_folder else None
@@ -1291,14 +1830,14 @@ class MainWindow(QMainWindow):
         query = self.search.text().strip().lower()
         items = []
         for x in self.registry:
+            if self.is_archived_path(self.category_path_for_item(x)):
+                continue
             if query not in x["name"].lower():
                 continue
-            main_cat = self.category_fallback(x.get("main_category", ""), "未分類")
-            sub_cat = self.category_fallback(x.get("sub_category", ""), "未分類")
-            if self.selected_main_category and main_cat != self.selected_main_category:
-                continue
-            if self.selected_sub_category and sub_cat != self.selected_sub_category:
-                continue
+            categories = self.category_path_for_item(x)
+            if self.selected_category_path:
+                if categories[:len(self.selected_category_path)] != self.selected_category_path:
+                    continue
             items.append(x)
 
         self.folders_table.setRowCount(0)
@@ -1306,12 +1845,17 @@ class MainWindow(QMainWindow):
         for item in items:
             name = item["name"]
             path = item["path"]
+            categories = self.category_path_for_item(item)
             last_date = ""
-            has_unchecked = self.folder_has_unchecked(path)
+            highlight_enabled = (
+                self.is_category_highlight_enabled_for_path(categories)
+                and self.is_folder_tree_checked(path)
+            )
+            has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
 
             if os.path.isdir(path):
                 try:
-                    files = safe_list_files(path)
+                    files = safe_list_files(path, self.ignore_types)
                     latest_mtime = None
                     for filename in files:
                         file_path = os.path.join(path, filename)
@@ -1343,67 +1887,131 @@ class MainWindow(QMainWindow):
             self.select_folder_in_table(preserve_path)
 
     def refresh_category_tree(self):
+        self._category_tree_refreshing = True
+        self.category_tree.blockSignals(True)
         self.category_tree.clear()
         order = self.category_order()
-        categories: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+        root = {"children": {}, "folders": []}
         for item in self.registry:
-            main_cat = self.category_fallback(item.get("main_category", ""), "未分類")
-            sub_cat = self.category_fallback(item.get("sub_category", ""), "未分類")
-            categories.setdefault(main_cat, {}).setdefault(sub_cat, []).append(item)
+            categories = self.category_path_for_item(item)
+            if self.is_archived_path(categories):
+                continue
+            node = root
+            for category in categories:
+                node = node["children"].setdefault(category, {"children": {}, "folders": []})
+            node["folders"].append(item)
 
-        for main_cat in self.ordered_list(list(categories.keys()), order.get("main", [])):
-            main_item = QTreeWidgetItem([main_cat])
-            main_item.setData(0, Qt.UserRole, {"type": "main", "main": main_cat})
-            self.category_tree.addTopLevelItem(main_item)
-            main_has_unchecked = False
-            sub_order = order.get("sub", {}).get(main_cat, [])
-            for sub_cat in self.ordered_list(list(categories[main_cat].keys()), sub_order):
-                sub_item = QTreeWidgetItem([sub_cat])
-                sub_item.setData(0, Qt.UserRole, {"type": "sub", "main": main_cat, "sub": sub_cat})
-                main_item.addChild(sub_item)
-                sub_has_unchecked = False
-                folder_order = order.get("folder", {}).get(main_cat, {}).get(sub_cat, [])
-                for folder in self.folders_sorted_for_subcategory(categories[main_cat][sub_cat], folder_order):
-                    folder_item = QTreeWidgetItem([folder["name"]])
-                    folder_item.setToolTip(0, folder["path"])
-                    folder_item.setData(0, Qt.UserRole, {
-                        "type": "folder",
-                        "main": main_cat,
-                        "sub": sub_cat,
-                        "path": folder["path"],
-                    })
+        def add_nodes(
+            parent_item: Optional[QTreeWidgetItem],
+            node: Dict[str, Any],
+            path: List[str],
+            highlight_enabled: bool,
+        ) -> bool:
+            key = self.category_path_key(path)
+            has_unchecked = False
+            child_names = self.ordered_list(
+                list(node["children"].keys()),
+                order.get("categories", {}).get(key, []),
+            )
+            for name in child_names:
+                child_node = node["children"][name]
+                child_item = QTreeWidgetItem([name])
+                child_path = path + [name]
+                child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
+                child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
+                child_checked = self.is_category_checked(child_path)
+                child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
+                if parent_item is None:
+                    self.category_tree.addTopLevelItem(child_item)
+                else:
+                    parent_item.addChild(child_item)
+                child_highlight_enabled = highlight_enabled and child_checked
+                child_unchecked = add_nodes(child_item, child_node, child_path, child_highlight_enabled)
+                if child_unchecked and child_highlight_enabled:
+                    child_item.setForeground(0, QBrush(UNCHECKED_COLOR))
+                    has_unchecked = True
+
+            folder_order = order.get("folder", {}).get(key, [])
+            for folder in self.folders_sorted_for_category(node["folders"], folder_order):
+                folder_item = QTreeWidgetItem([folder["name"]])
+                folder_item.setToolTip(0, folder["path"])
+                folder_item.setFlags(folder_item.flags() | Qt.ItemIsUserCheckable)
+                folder_checked = self.is_folder_tree_checked(folder["path"])
+                folder_item.setCheckState(0, Qt.Checked if folder_checked else Qt.Unchecked)
+                folder_item.setData(0, Qt.UserRole, {
+                    "type": "folder",
+                    "path": folder["path"],
+                    "category_path": path,
+                })
+                folder_highlight_enabled = highlight_enabled and folder_checked
+                if folder_highlight_enabled:
                     folder_unchecked = self.folder_has_unchecked(folder["path"])
                     if folder_unchecked:
-                        sub_has_unchecked = True
-                        main_has_unchecked = True
                         folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
-                    sub_item.addChild(folder_item)
-                if sub_has_unchecked:
-                    sub_item.setForeground(0, QBrush(UNCHECKED_COLOR))
-            if main_has_unchecked:
-                main_item.setForeground(0, QBrush(UNCHECKED_COLOR))
+                        has_unchecked = True
+                if parent_item is None:
+                    self.category_tree.addTopLevelItem(folder_item)
+                else:
+                    parent_item.addChild(folder_item)
+            return has_unchecked if highlight_enabled else False
+
+        add_nodes(None, root, [], True)
 
         self.category_tree.expandAll()
+        self.category_tree.blockSignals(False)
+        self._category_tree_refreshing = False
+
+    def schedule_category_tree_refresh(self):
+        if self._category_tree_refresh_pending:
+            return
+        self._category_tree_refresh_pending = True
+        QTimer.singleShot(0, self.apply_category_tree_refresh)
+
+    def apply_category_tree_refresh(self):
+        self._category_tree_refresh_pending = False
+        self.refresh_category_tree()
 
     def update_category_order_from_tree(self):
-        order = {"main": [], "sub": {}, "folder": {}}
+        order = {"categories": {}, "folder": {}}
+
+        def walk(item: QTreeWidgetItem, path: List[str]):
+            category_order = []
+            folder_order = []
+            for i in range(item.childCount()):
+                child = item.child(i)
+                data = child.data(0, Qt.UserRole) or {}
+                if data.get("type") == "category":
+                    category_order.append(child.text(0))
+                elif data.get("type") == "folder":
+                    folder_path = data.get("path")
+                    if folder_path:
+                        folder_order.append(folder_path)
+            if category_order:
+                order["categories"][self.category_path_key(path)] = category_order
+            if folder_order:
+                order["folder"][self.category_path_key(path)] = folder_order
+            for i in range(item.childCount()):
+                child = item.child(i)
+                data = child.data(0, Qt.UserRole) or {}
+                if data.get("type") == "category":
+                    walk(child, path + [child.text(0)])
+
+        root_categories = []
+        root_folders = []
         for i in range(self.category_tree.topLevelItemCount()):
-            main_item = self.category_tree.topLevelItem(i)
-            main_name = main_item.text(0)
-            order["main"].append(main_name)
-            order["sub"][main_name] = []
-            order["folder"][main_name] = {}
-            for j in range(main_item.childCount()):
-                sub_item = main_item.child(j)
-                sub_name = sub_item.text(0)
-                order["sub"][main_name].append(sub_name)
-                order["folder"][main_name][sub_name] = []
-                for k in range(sub_item.childCount()):
-                    folder_item = sub_item.child(k)
-                    data = folder_item.data(0, Qt.UserRole) or {}
-                    path = data.get("path")
-                    if path:
-                        order["folder"][main_name][sub_name].append(path)
+            top = self.category_tree.topLevelItem(i)
+            data = top.data(0, Qt.UserRole) or {}
+            if data.get("type") == "category":
+                root_categories.append(top.text(0))
+                walk(top, [top.text(0)])
+            elif data.get("type") == "folder":
+                path = data.get("path")
+                if path:
+                    root_folders.append(path)
+        if root_categories:
+            order["categories"][self.category_path_key([])] = root_categories
+        if root_folders:
+            order["folder"][self.category_path_key([])] = root_folders
         self.settings["category_order"] = order
         save_settings(self.settings)
 
@@ -1444,7 +2052,7 @@ class MainWindow(QMainWindow):
             self.files_table.setUpdatesEnabled(True)
             return
 
-        meta, rows = scan_folder(folder_path)
+        meta, rows = scan_folder(folder_path, self.ignore_types)
         self.current_meta = meta
         self.current_file_rows = rows
 
@@ -1511,6 +2119,28 @@ class MainWindow(QMainWindow):
         self.update_category_order_from_tree()
         self.refresh_category_tree()
 
+    def on_category_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        if self._category_tree_refreshing:
+            return
+        if column != 0:
+            return
+        data = item.data(0, Qt.UserRole) or {}
+        item_type = data.get("type")
+        if item_type == "category":
+            path = data.get("path", [])
+            if not isinstance(path, list):
+                return
+            self.set_category_checked(path, item.checkState(0) == Qt.Checked)
+        elif item_type == "folder":
+            folder_path = data.get("path")
+            if not isinstance(folder_path, str):
+                return
+            self.set_folder_tree_checked(folder_path, item.checkState(0) == Qt.Checked)
+        else:
+            return
+        self.refresh_folder_table()
+        self.schedule_category_tree_refresh()
+
     def on_folders_table_context_menu(self, pos):
         item = self.folders_table.itemAt(pos)
         if not item:
@@ -1541,11 +2171,16 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         act_register = None
+        act_batch_register = None
         act_edit = None
         act_delete = None
+        act_archive = None
 
-        if item_type in {"main", "sub"}:
+        if item_type == "category":
             act_register = menu.addAction("登録")
+            act_batch_register = menu.addAction("一括登録")
+            act_delete = menu.addAction("削除")
+            act_archive = menu.addAction("アーカイブ")
         elif item_type == "folder":
             act_edit = menu.addAction("編集")
             act_delete = menu.addAction("削除")
@@ -1553,18 +2188,43 @@ class MainWindow(QMainWindow):
             return
 
         action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+        if not action:
+            return
         if action == act_register:
-            initial_main = data.get("main", "")
-            initial_sub = data.get("sub", "") if item_type == "sub" else ""
-            self.open_register_dialog(initial_main_category=initial_main, initial_sub_category=initial_sub)
+            initial_categories = data.get("path", [])
+            if not isinstance(initial_categories, list):
+                initial_categories = []
+            self.open_register_dialog(initial_categories=initial_categories)
+        elif action == act_batch_register:
+            initial_categories = data.get("path", [])
+            if not isinstance(initial_categories, list):
+                initial_categories = []
+            self.on_batch_register_for_category(initial_categories)
         elif action == act_edit:
             path = data.get("path")
+            if not isinstance(path, str):
+                path = item.toolTip(0)
             if path:
                 self.edit_registered_folder(path)
         elif action == act_delete:
             path = data.get("path")
-            if path:
+            if item_type == "folder" and not isinstance(path, str):
+                path = item.toolTip(0)
+            if not path:
+                return
+            if item_type == "folder":
                 self.delete_registered_folder(path)
+            else:
+                if not isinstance(path, list):
+                    return
+                self.delete_category_hierarchy(path)
+        elif action == act_archive:
+            path = data.get("path")
+            if not isinstance(path, list):
+                return
+            if path and self.archive_category_path(path):
+                self.refresh_folder_table()
+                self.refresh_category_tree()
 
     def on_files_table_context_menu(self, pos):
         item = self.files_table.itemAt(pos)
@@ -1624,27 +2284,22 @@ class MainWindow(QMainWindow):
         self.refresh_folder_table()
         self.refresh_category_tree()
 
-    def open_register_dialog(self, initial_main_category: str = "", initial_sub_category: str = ""):
-        main_options, sub_options = self.category_options()
+    def open_register_dialog(self, initial_categories: Optional[List[str]] = None):
+        category_options = self.category_options()
         dlg = RegisterDialog(
             self,
-            initial_main_category=initial_main_category,
-            initial_sub_category=initial_sub_category,
-            main_category_options=main_options,
-            sub_category_options=sub_options,
+            initial_categories=initial_categories or [],
+            category_options=category_options,
         )
         if dlg.exec() != QDialog.Accepted:
             return
-        name, path, main_category, sub_category = dlg.get_values()
-        if not name or not path or not main_category or not sub_category:
-            self.warn("登録名・フォルダパス・メインカテゴリ・サブカテゴリを入力してください。")
+        name, path, categories = dlg.get_values()
+        if not name or not path or not categories:
+            self.warn("登録名・フォルダパス・カテゴリ階層1を入力してください。")
             return
         if not os.path.isdir(path):
             self.warn("フォルダが存在しません。")
             return
-
-        # Ensure _History/_Meta
-        ensure_folder_structure(path)
 
         # Prevent duplicates by path
         for x in self.registry:
@@ -1655,8 +2310,7 @@ class MainWindow(QMainWindow):
         self.registry.append({
             "name": name,
             "path": path,
-            "main_category": main_category,
-            "sub_category": sub_category,
+            "categories": categories,
         })
         save_registry(self.registry)
         self.refresh_folder_table()
@@ -1665,6 +2319,54 @@ class MainWindow(QMainWindow):
 
     def on_register(self):
         self.open_register_dialog()
+
+    def on_batch_register(self):
+        dlg = BatchRegisterDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        root_path = dlg.get_path()
+        max_depth = dlg.get_depth()
+        self.run_batch_register(root_path, max_depth)
+
+    def run_batch_register(
+        self,
+        root_path: str,
+        max_depth: int,
+        base_categories: Optional[List[str]] = None,
+    ) -> None:
+        if not root_path:
+            self.warn("対象ディレクトリを選択してください。")
+            return
+        if not os.path.isdir(root_path):
+            self.warn("ディレクトリが存在しません。")
+            return
+
+        items = self.batch_register_items(root_path, max_depth, base_categories=base_categories)
+        if not items:
+            self.warn("登録できるフォルダがありません。")
+            return
+
+        preview_dialog = BatchPreviewDialog(items, self)
+        if preview_dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_items = preview_dialog.selected_items()
+        if not selected_items:
+            self.warn("取り込む項目がありません。")
+            return
+        self.registry.extend(selected_items)
+        save_registry(self.registry)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.info(f"{len(selected_items)} 件を一括登録しました。")
+
+    def on_batch_register_for_category(self, category_path: List[str]):
+        dlg = BatchRegisterDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        root_path = dlg.get_path()
+        max_depth = dlg.get_depth()
+        self.run_batch_register(root_path, max_depth, base_categories=category_path)
 
     def on_folder_selected(self):
         idx = self.selected_folder_index()
@@ -1698,17 +2400,11 @@ class MainWindow(QMainWindow):
             return
         data = items[0].data(0, Qt.UserRole) or {}
         item_type = data.get("type")
-        if item_type == "main":
-            self.selected_main_category = data.get("main", "")
-            self.selected_sub_category = ""
-            self.refresh_folder_table()
-        elif item_type == "sub":
-            self.selected_main_category = data.get("main", "")
-            self.selected_sub_category = data.get("sub", "")
+        if item_type == "category":
+            self.selected_category_path = data.get("path", [])
             self.refresh_folder_table()
         elif item_type == "folder":
-            self.selected_main_category = data.get("main", "")
-            self.selected_sub_category = data.get("sub", "")
+            self.selected_category_path = data.get("category_path", [])
             self.refresh_folder_table()
             self.select_folder_in_table(data.get("path", ""))
 
@@ -1738,16 +2434,50 @@ class MainWindow(QMainWindow):
         for item in self.registry:
             path = item.get("path", "")
             if path and os.path.isdir(path):
-                scan_folder(path)
+                scan_folder(path, self.ignore_types)
 
     def on_options(self):
-        dlg = OptionsDialog(self.memo_timeout_min, self)
+        dlg = OptionsDialog(self.memo_timeout_min, self.ignore_types, self)
         if dlg.exec() != QDialog.Accepted:
             return
         self.memo_timeout_min = dlg.get_timeout_min()
+        self.ignore_types = normalize_ignore_types(dlg.get_ignore_types())
         self.settings["memo_timeout_min"] = self.memo_timeout_min
+        self.settings["ignore_types"] = self.ignore_types
         save_settings(self.settings)
+        self.refresh_folder_table()
+        self.refresh_files_table()
         self.info("設定を保存しました。")
+
+    def on_archive(self):
+        archived = self.archived_categories()
+        if not archived:
+            self.info("アーカイブはありません。")
+            return
+        entries = []
+        for path in archived:
+            count = sum(
+                1 for item in self.registry
+                if self.category_path_for_item(item)[:len(path)] == path
+            )
+            entries.append({
+                "path": path,
+                "label": " / ".join(path),
+                "count": count,
+            })
+        dlg = ArchiveDialog(entries, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        action = dlg.selected_action
+        path = dlg.selected_path()
+        if not path:
+            return
+        if action == "restore":
+            self.unarchive_category_path(path)
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+        elif action == "delete":
+            self.delete_category_hierarchy(path)
 
     # ---------- core operations ----------
     def _get_selected_doc(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
@@ -1797,7 +2527,7 @@ class MainWindow(QMainWindow):
         new_rev = format_rev(A, B, C, today_yyyymmdd())
         new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
 
         cur_path = os.path.join(folder_path, cur_fn)
         new_path = os.path.join(folder_path, new_fn)
@@ -1895,7 +2625,7 @@ class MainWindow(QMainWindow):
             self.warn("差し替えるファイルを選択してください。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
 
         cur_path = os.path.join(folder_path, cur_fn)
         if not os.path.exists(cur_path):
@@ -2001,7 +2731,7 @@ class MainWindow(QMainWindow):
             self.warn("履歴ファイル名が取得できません。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
         history_path = os.path.join(history_dir, history_file)
         if not os.path.exists(history_path):
             self.warn("履歴ファイルが見つかりません。")
@@ -2095,7 +2825,7 @@ class MainWindow(QMainWindow):
             self.warn("削除対象が選択されていません。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
         deleted_files = set()
         errors = []
         for item in selected_items:
@@ -2193,7 +2923,12 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    icon = load_app_icon()
+    if icon:
+        app.setWindowIcon(icon)
     w = MainWindow()
+    if icon:
+        w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
 
