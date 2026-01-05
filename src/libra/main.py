@@ -559,7 +559,7 @@ class RegisterDialog(QDialog):
         ok_label: str = "登録",
     ):
         super().__init__(parent)
-        self.setWindowTitle("登録（G1）")
+        self.setWindowTitle("登録")
         self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
@@ -843,7 +843,7 @@ class ArchiveDialog(QDialog):
 class VersionSelectDialog(QDialog):
     def __init__(self, current_rev: str, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("バージョン管理（G2）")
+        self.setWindowTitle("更新")
         self.setMinimumWidth(420)
 
         self.current_rev = current_rev
@@ -1306,11 +1306,10 @@ class MainWindow(QMainWindow):
         btn_batch_register = QPushButton("一括登録")
         btn_batch_register.clicked.connect(self.on_batch_register)
 
-        tree_header_row = QHBoxLayout()
-        tree_header_row.addWidget(tree_title)
-        tree_header_row.addStretch(1)
-        tree_header_row.addWidget(btn_register)
-        tree_header_row.addWidget(btn_batch_register)
+        tree_button_row = QHBoxLayout()
+        tree_button_row.addWidget(btn_register)
+        tree_button_row.addWidget(btn_batch_register)
+        tree_button_row.addStretch(1)
 
         self.category_tree = CategoryTreeWidget()
         self.category_tree.setHeaderHidden(True)
@@ -1324,7 +1323,8 @@ class MainWindow(QMainWindow):
         self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
-        tree_layout.addLayout(tree_header_row)
+        tree_layout.addWidget(tree_title)
+        tree_layout.addLayout(tree_button_row)
         tree_layout.addWidget(self.category_tree)
         splitter.addWidget(tree_box)
 
@@ -1335,9 +1335,12 @@ class MainWindow(QMainWindow):
 
         folders_title = QLabel("フォルダリスト")
 
-        folders_header_row = QHBoxLayout()
-        folders_header_row.addWidget(folders_title)
-        folders_header_row.addStretch(1)
+        btn_edit_folder = QPushButton("編集")
+        btn_edit_folder.clicked.connect(self.on_edit_selected_folder)
+
+        folders_button_row = QHBoxLayout()
+        folders_button_row.addWidget(btn_edit_folder)
+        folders_button_row.addStretch(1)
 
         self.folders_table = QTableWidget(0, 2)
         self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最終更新日"])
@@ -1350,7 +1353,8 @@ class MainWindow(QMainWindow):
         self.folders_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.folders_table.customContextMenuRequested.connect(self.on_folders_table_context_menu)
 
-        left_layout.addLayout(folders_header_row)
+        left_layout.addWidget(folders_title)
+        left_layout.addLayout(folders_button_row)
         left_layout.addWidget(self.folders_table)
         splitter.addWidget(left_box)
 
@@ -1367,11 +1371,10 @@ class MainWindow(QMainWindow):
         btn_replace = QPushButton("差し替え")
         btn_replace.clicked.connect(self.on_replace)
 
-        files_header_row = QHBoxLayout()
-        files_header_row.addWidget(files_title)
-        files_header_row.addStretch(1)
-        files_header_row.addWidget(btn_update)
-        files_header_row.addWidget(btn_replace)
+        files_button_row = QHBoxLayout()
+        files_button_row.addWidget(btn_update)
+        files_button_row.addWidget(btn_replace)
+        files_button_row.addStretch(1)
 
         self.files_table = QTableWidget(0, 6)
         self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
@@ -1389,7 +1392,8 @@ class MainWindow(QMainWindow):
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
-        mid_layout.addLayout(files_header_row)
+        mid_layout.addWidget(files_title)
+        mid_layout.addLayout(files_button_row)
         mid_layout.addWidget(self.files_table)
         splitter.addWidget(mid_box)
 
@@ -2549,6 +2553,21 @@ class MainWindow(QMainWindow):
         root_path = dlg.get_path()
         max_depth = dlg.get_depth()
         self.run_batch_register(root_path, max_depth, base_categories=category_path)
+
+    def on_edit_selected_folder(self):
+        idx = self.selected_folder_index()
+        if idx < 0:
+            self.warn("フォルダを選択してください。")
+            return
+        it = self.folders_table.item(idx, 0)
+        if not it:
+            self.warn("登録情報が見つかりません。")
+            return
+        path = it.data(Qt.UserRole)
+        if not path:
+            self.warn("登録情報が見つかりません。")
+            return
+        self.edit_registered_folder(path)
 
     def on_folder_selected(self):
         idx = self.selected_folder_index()
