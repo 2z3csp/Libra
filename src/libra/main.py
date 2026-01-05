@@ -2212,12 +2212,45 @@ class MainWindow(QMainWindow):
         elif action == act_register_as_category:
             root_path = data.get("path")
             category_path = data.get("category_path", [])
+            folder_name = item.text(0).strip()
             if not isinstance(root_path, str) or not root_path:
                 return
             if not isinstance(category_path, list):
                 category_path = []
             base_categories = normalize_category_path(category_path)
-            self.run_batch_register(root_path, 1, base_categories=base_categories)
+            if not self.run_batch_register(root_path, 1, base_categories=base_categories):
+                return
+            idx = self.registry_index_by_path(root_path)
+            if idx >= 0:
+                self.registry.pop(idx)
+                self.remove_user_checks_for_paths({root_path})
+                save_registry(self.registry)
+                if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(root_path):
+                    self.current_folder = None
+                    self.current_meta = None
+                    self.current_file_rows = []
+            if not folder_name:
+                folder_name = self.root_category_name(root_path)
+            order = self.category_order()
+            key = self.category_path_key(category_path)
+            folder_order = order.get("folder", {}).get(key, [])
+            if isinstance(folder_order, list):
+                order["folder"][key] = [
+                    path for path in folder_order
+                    if os.path.normcase(path) != os.path.normcase(root_path)
+                ]
+            category_order = order.get("categories", {}).get(key, [])
+            if not isinstance(category_order, list):
+                category_order = []
+            if folder_name and folder_name not in category_order:
+                category_order.append(folder_name)
+            if category_order:
+                order["categories"][key] = category_order
+            self.settings["category_order"] = order
+            save_settings(self.settings)
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+            self.refresh_files_table()
         elif action == act_delete:
             path = data.get("path")
             if item_type == "folder" and not isinstance(path, str):
@@ -2345,32 +2378,33 @@ class MainWindow(QMainWindow):
         root_path: str,
         max_depth: int,
         base_categories: Optional[List[str]] = None,
-    ) -> None:
+    ) -> bool:
         if not root_path:
             self.warn("対象ディレクトリを選択してください。")
-            return
+            return False
         if not os.path.isdir(root_path):
             self.warn("ディレクトリが存在しません。")
-            return
+            return False
 
         items = self.batch_register_items(root_path, max_depth, base_categories=base_categories)
         if not items:
             self.warn("登録できるフォルダがありません。")
-            return
+            return False
 
         preview_dialog = BatchPreviewDialog(items, self)
         if preview_dialog.exec() != QDialog.Accepted:
-            return
+            return False
 
         selected_items = preview_dialog.selected_items()
         if not selected_items:
             self.warn("取り込む項目がありません。")
-            return
+            return False
         self.registry.extend(selected_items)
         save_registry(self.registry)
         self.refresh_folder_table()
         self.refresh_category_tree()
         self.info(f"{len(selected_items)} 件を一括登録しました。")
+        return True
 
     def on_batch_register_for_category(self, category_path: List[str]):
         dlg = BatchRegisterDialog(self)
