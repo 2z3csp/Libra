@@ -1335,6 +1335,9 @@ class MainWindow(QMainWindow):
 
         folders_title = QLabel("フォルダリスト")
 
+        folders_button_row = QHBoxLayout()
+        folders_button_row.addStretch(1)
+
         self.folders_table = QTableWidget(0, 2)
         self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最終更新日"])
         self.folders_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1347,6 +1350,7 @@ class MainWindow(QMainWindow):
         self.folders_table.customContextMenuRequested.connect(self.on_folders_table_context_menu)
 
         left_layout.addWidget(folders_title)
+        left_layout.addLayout(folders_button_row)
         left_layout.addWidget(self.folders_table)
         splitter.addWidget(left_box)
 
