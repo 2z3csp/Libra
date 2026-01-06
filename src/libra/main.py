@@ -2405,10 +2405,11 @@ class MainWindow(QMainWindow):
             def add_category(name: str) -> None:
                 nonlocal has_unchecked
                 child_node = node["children"][name]
-                child_item = QTreeWidgetItem([f"🔖 {name}"])
                 child_path = path + [name]
-                child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 folder_path = self.category_folder_path_for_path(child_path)
+                icon_prefix = "📁 " if folder_path else "🔖 "
+                child_item = QTreeWidgetItem([f"{icon_prefix}{name}"])
+                child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 if folder_path:
                     child_item.setToolTip(0, folder_path)
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
@@ -2814,7 +2815,7 @@ class MainWindow(QMainWindow):
             act_archive = menu.addAction("アーカイブ")
         elif item_type == "folder":
             act_edit = menu.addAction("編集")
-            act_register_as_category = menu.addAction("カテゴリとして登録")
+            act_register_as_category = menu.addAction("下位フォルダを登録")
             act_delete = menu.addAction("削除")
         else:
             return
@@ -2906,6 +2907,7 @@ class MainWindow(QMainWindow):
                 folder_name = self.strip_icon_prefix(item.text(0).strip())
             if not folder_name:
                 folder_name = self.root_category_name(root_path)
+            category_folder_path = root_path
             order = self.category_order()
             key = self.category_path_key(category_path)
             folder_order = order.get("folder", {}).get(key, [])
@@ -2935,6 +2937,8 @@ class MainWindow(QMainWindow):
                 order["tree"][key] = updated_tree
             self.settings["category_order"] = order
             save_settings(self.settings)
+            new_category_path = normalize_category_path(category_path + [folder_name])
+            self.set_category_folder_path(new_category_path, category_folder_path)
             self.refresh_folder_table()
             self.refresh_category_tree()
             self.refresh_files_table()
