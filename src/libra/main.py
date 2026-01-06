@@ -161,6 +161,7 @@ def load_settings() -> Dict[str, Any]:
         "category_order": {"categories": {}, "folder": {}},
         "archived_categories": [],
         "category_folder_paths": {},
+        "folder_subfolder_counts": {},
         "ignored_scan_paths": [],
         "ignore_types": {
             "shortcut": True,
@@ -1613,6 +1614,7 @@ class MainWindow(QMainWindow):
         self._category_tree_refreshing = False
         self._category_tree_refresh_pending = False
         self.new_folder_highlights: set[str] = set()
+        self.new_category_highlights: set[str] = set()
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1798,6 +1800,7 @@ class MainWindow(QMainWindow):
         key = self.category_path_key(path)
         if folder_path:
             paths[key] = folder_path
+            self.record_folder_subfolder_count(folder_path)
         else:
             paths.pop(key, None)
         self.settings["category_folder_paths"] = paths
@@ -1942,6 +1945,44 @@ class MainWindow(QMainWindow):
     def folder_key(self, folder_path: str) -> str:
         return os.path.normcase(os.path.abspath(folder_path))
 
+    def count_immediate_subfolders(self, folder_path: str, ignored_paths: Optional[set[str]] = None) -> int:
+        if not os.path.isdir(folder_path):
+            return 0
+        try:
+            count = 0
+            for name in os.listdir(folder_path):
+                if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
+                    continue
+                full = os.path.join(folder_path, name)
+                if os.path.isdir(full):
+                    if ignored_paths and self.folder_key(full) in ignored_paths:
+                        continue
+                    count += 1
+            return count
+        except Exception:
+            return 0
+
+    def folder_subfolder_counts(self) -> Dict[str, int]:
+        data = self.settings.get("folder_subfolder_counts", {})
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            self.folder_key(str(key)): int(value)
+            for key, value in data.items()
+            if isinstance(key, str)
+        }
+
+    def save_folder_subfolder_counts(self, counts: Dict[str, int]) -> None:
+        self.settings["folder_subfolder_counts"] = counts
+        save_settings(self.settings)
+
+    def record_folder_subfolder_count(self, folder_path: str) -> None:
+        if not folder_path:
+            return
+        counts = self.folder_subfolder_counts()
+        counts[self.folder_key(folder_path)] = self.count_immediate_subfolders(folder_path)
+        self.save_folder_subfolder_counts(counts)
+
     def ignored_scan_paths(self) -> set[str]:
         data = self.settings.get("ignored_scan_paths", [])
         ignored: set[str] = set()
@@ -1974,34 +2015,35 @@ class MainWindow(QMainWindow):
         self.save_ignored_scan_paths(ignored)
 
     def detect_new_subfolders(self) -> set[str]:
-        registered_paths = {self.folder_key(item["path"]) for item in self.registry}
+        counts = self.folder_subfolder_counts()
         ignored_paths = self.ignored_scan_paths()
         highlights: set[str] = set()
-        for item in self.registry:
-            root_path = item.get("path", "")
-            if not isinstance(root_path, str) or not root_path:
-                continue
-            if not os.path.isdir(root_path):
+        targets: set[str] = {
+            item["path"]
+            for item in self.registry
+            if isinstance(item.get("path"), str)
+        }
+        for folder_path in self.category_folder_paths().values():
+            if isinstance(folder_path, str) and folder_path:
+                targets.add(folder_path)
+        for root_path in targets:
+            if not root_path or not os.path.isdir(root_path):
                 continue
             root_key = self.folder_key(root_path)
-            try:
-                for name in os.listdir(root_path):
-                    if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
-                        continue
-                    full = os.path.join(root_path, name)
-                    if not os.path.isdir(full):
-                        continue
-                    key = self.folder_key(full)
-                    if key in registered_paths or key in ignored_paths:
-                        continue
-                    highlights.add(root_key)
-                    break
-            except Exception:
+            if root_key in ignored_paths:
                 continue
+            current_count = self.count_immediate_subfolders(root_path, ignored_paths)
+            previous_count = counts.get(root_key, current_count)
+            if current_count > previous_count:
+                highlights.add(root_key)
         return highlights
 
     def update_new_folder_highlights(self) -> None:
         self.new_folder_highlights = self.detect_new_subfolders()
+        self.new_category_highlights = set()
+        for path, folder_path in self.category_folder_paths().items():
+            if self.folder_key(folder_path) in self.new_folder_highlights:
+                self.new_category_highlights.add(path)
 
     def doc_is_checked(self, folder_path: str, doc_key: str, doc_info: Optional[Dict[str, Any]] = None) -> bool:
         folder_key = self.folder_key(folder_path)
@@ -2145,6 +2187,7 @@ class MainWindow(QMainWindow):
         item["categories"] = categories
         self.registry[idx] = item
         save_registry(self.registry)
+        self.record_folder_subfolder_count(new_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(old_path):
@@ -2481,6 +2524,8 @@ class MainWindow(QMainWindow):
                 it_name = QTableWidgetItem(f"{icon_prefix}{name}")
                 if category_folder_path:
                     it_name.setToolTip(category_folder_path)
+                    if self.category_path_key(path) in self.new_category_highlights:
+                        has_new_subfolder = True
                 it_name.setData(Qt.UserRole, {"type": "category", "path": path})
             else:
                 icon_prefix = "📁 "
@@ -2538,6 +2583,8 @@ class MainWindow(QMainWindow):
                 child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 if folder_path:
                     child_item.setToolTip(0, folder_path)
+                    if self.category_path_key(child_path) in self.new_category_highlights:
+                        child_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
@@ -3340,6 +3387,7 @@ class MainWindow(QMainWindow):
             "categories": categories,
         })
         save_registry(self.registry)
+        self.record_folder_subfolder_count(path)
         self.remove_ignored_scan_paths([path])
         self.mark_all_docs_checked(path)
         self.refresh_folder_table()
@@ -3399,6 +3447,7 @@ class MainWindow(QMainWindow):
         for item in selected_items:
             folder_path = item.get("path")
             if isinstance(folder_path, str):
+                self.record_folder_subfolder_count(folder_path)
                 self.mark_all_docs_checked(folder_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
