@@ -2035,6 +2035,45 @@ class MainWindow(QMainWindow):
                 ignored.discard(self.folder_key(path))
         self.save_ignored_scan_paths(ignored)
 
+    def remove_folder_settings_for_paths(self, paths: List[str]) -> None:
+        if not paths:
+            return
+        keys = {self.folder_key(path) for path in paths if path}
+        if not keys:
+            return
+        folder_checks = self.folder_tree_check_states()
+        folder_checks = {k: v for k, v in folder_checks.items() if k not in keys}
+        self.settings["folder_tree_check_states"] = folder_checks
+        counts = self.folder_subfolder_counts()
+        counts = {k: v for k, v in counts.items() if k not in keys}
+        self.settings["folder_subfolder_counts"] = counts
+        ignored = self.ignored_scan_paths()
+        ignored.difference_update(keys)
+        self.settings["ignored_scan_paths"] = sorted(ignored)
+        save_settings(self.settings)
+
+    def remove_category_settings_under_path(self, path: List[str]) -> List[str]:
+        target_key = self.category_path_key(path)
+        prefix = f"{target_key}{CATEGORY_PATH_SEP}" if target_key else ""
+        removed_paths: List[str] = []
+        paths = self.category_folder_paths()
+        remaining_paths = {}
+        for key, value in paths.items():
+            if key == target_key or (prefix and key.startswith(prefix)):
+                removed_paths.append(value)
+            else:
+                remaining_paths[key] = value
+        self.settings["category_folder_paths"] = remaining_paths
+        checks = self.category_check_states()
+        remaining_checks = {
+            key: value
+            for key, value in checks.items()
+            if key != target_key and not (prefix and key.startswith(prefix))
+        }
+        self.settings["category_check_states"] = remaining_checks
+        save_settings(self.settings)
+        return removed_paths
+
     def preview_subfolder_counts(self, root_path: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
         child_map: Dict[str, set[str]] = {}
         for entry in items:
@@ -2301,7 +2340,7 @@ class MainWindow(QMainWindow):
             return
         self.registry.pop(idx)
         save_registry(self.registry)
-        self.add_ignored_scan_paths([path])
+        self.remove_folder_settings_for_paths([path])
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(path):
             self.current_folder = None
             self.current_meta = None
@@ -2325,9 +2364,11 @@ class MainWindow(QMainWindow):
             return
         target_paths = {item["path"] for item in targets}
         self.registry = [item for item in self.registry if item["path"] not in target_paths]
-        self.add_ignored_scan_paths(list(target_paths))
+        self.remove_folder_settings_for_paths(list(target_paths))
         self.remove_user_checks_for_paths(target_paths)
         self.remove_archived_under_path(path)
+        removed_category_paths = self.remove_category_settings_under_path(path)
+        self.remove_folder_settings_for_paths(removed_category_paths)
         order = self.category_order()
         target_key = self.category_path_key(path)
         parent_key = self.category_path_key(path[:-1])
