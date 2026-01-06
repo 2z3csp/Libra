@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
 
         self.files_table = QTableWidget(0, 6)
         self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
-        files_header_item = QTableWidgetItem("ファイル確認チェック")
+        files_header_item = QTableWidgetItem("")
         files_header_item.setFlags(files_header_item.flags() | Qt.ItemIsUserCheckable)
         files_header_item.setCheckState(Qt.Unchecked)
         self.files_table.setHorizontalHeaderItem(0, files_header_item)
