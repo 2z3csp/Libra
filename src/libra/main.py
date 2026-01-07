@@ -354,20 +354,18 @@ def parse_rev_from_rev_string(rev_str: str) -> Optional[Tuple[int, int, int]]:
 
 def should_select_patch(latest: Tuple[int, int, int], candidate: Tuple[int, int, int]) -> bool:
     latest_A, latest_B, _latest_C = latest
-    A, B, C = candidate
-    if (A, B) == (latest_A, latest_B):
+    A, B, _C = candidate
+    if (A, B) != (latest_A, latest_B):
         return False
-    if A < latest_A or (A == latest_A and B < latest_B):
-        return C > 0
-    return False
+    return candidate < latest
 
 
 def should_select_minor(latest: Tuple[int, int, int], candidate: Tuple[int, int, int]) -> bool:
-    latest_A, _latest_B, _latest_C = latest
+    latest_A, latest_B, _latest_C = latest
     A, B, _C = candidate
-    if A < latest_A:
-        return B > 0
-    return False
+    if A != latest_A or B >= latest_B:
+        return False
+    return candidate < latest
 
 
 def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, bool]:
