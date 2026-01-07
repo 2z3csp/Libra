@@ -3607,6 +3607,7 @@ class MainWindow(QMainWindow):
             self.set_folder_subfolder_count(folder_path, count)
 
         if not selected_items:
+            self.update_new_folder_highlights()
             self.refresh_folder_table()
             self.refresh_category_tree()
             self.info("登録を行いませんでした。")
@@ -3623,6 +3624,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.record_folder_subfolder_count(folder_path)
                 self.mark_all_docs_checked(folder_path)
+        self.update_new_folder_highlights()
         self.refresh_folder_table()
         self.refresh_category_tree()
         self.info(f"{len(selected_items)} 件を一括登録しました。")
@@ -3757,6 +3759,9 @@ class MainWindow(QMainWindow):
             path = item.get("path", "")
             if path and os.path.isdir(path):
                 scan_folder(path, self.ignore_types)
+        self.update_new_folder_highlights()
+        self.refresh_folder_table()
+        self.refresh_category_tree()
 
     def on_options(self):
         dlg = OptionsDialog(self.memo_timeout_min, self.ignore_types, self.version_rules, self)
