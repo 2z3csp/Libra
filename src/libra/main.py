@@ -1450,6 +1450,12 @@ class MainWindow(QMainWindow):
         self.registry = load_registry()
         self.settings = load_settings()
         self.user_checks = load_user_checks()
+        self._settings_save_pending = False
+        self._user_checks_save_pending = False
+        self._folder_table_refresh_pending = False
+        self._folder_table_refresh_force_scan = True
+        self.folder_unchecked_cache: Dict[str, bool] = {}
+        self.folder_latest_date_cache: Dict[str, str] = {}
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
         self.ignore_types = normalize_ignore_types(self.settings.get("ignore_types"))
         self.version_rules = normalize_version_rules(self.settings.get("version_rules"))
@@ -1475,7 +1481,7 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("検索（登録名でフィルタ）")
-        self.search.textChanged.connect(self.refresh_folder_table)
+        self.search.textChanged.connect(lambda _text: self.refresh_folder_table())
 
         btn_rescan = QPushButton("再スキャン")
         btn_rescan.clicked.connect(self.on_rescan)
@@ -1928,13 +1934,13 @@ class MainWindow(QMainWindow):
         checks = self.category_check_states()
         checks[self.category_path_key(path)] = checked
         self.settings["category_check_states"] = checks
-        save_settings(self.settings)
+        self.schedule_settings_save()
 
     def set_folder_tree_checked(self, folder_path: str, checked: bool) -> None:
         checks = self.folder_tree_check_states()
         checks[self.folder_key(folder_path)] = checked
         self.settings["folder_tree_check_states"] = checks
-        save_settings(self.settings)
+        self.schedule_settings_save()
 
     def is_category_highlight_enabled_for_path(self, path: List[str]) -> bool:
         for depth in range(1, len(path) + 1):
@@ -2202,7 +2208,7 @@ class MainWindow(QMainWindow):
             folder_checks = {}
         folder_checks[doc_key] = checked
         self.user_checks[folder_key] = folder_checks
-        save_user_checks(self.user_checks)
+        self.schedule_user_checks_save()
 
     def mark_doc_checked(self, folder_path: str, doc_key: str) -> None:
         self.set_doc_checked(folder_path, doc_key, True)
@@ -2225,7 +2231,8 @@ class MainWindow(QMainWindow):
                 updated = True
         if updated:
             self.user_checks[folder_key] = folder_checks
-            save_user_checks(self.user_checks)
+            self.schedule_user_checks_save()
+            self.folder_unchecked_cache[self.folder_key(folder_path)] = False
 
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
@@ -2572,7 +2579,7 @@ class MainWindow(QMainWindow):
                 return found
         return None
 
-    def refresh_folder_table(self):
+    def refresh_folder_table(self, force_scan: bool = True):
         preserve_key: Optional[Tuple[str, str]] = None
         if self.current_folder:
             preserve_key = ("folder", self.current_folder["path"])
@@ -2666,28 +2673,13 @@ class MainWindow(QMainWindow):
                     self.is_category_highlight_enabled_for_path(categories)
                     and self.is_folder_tree_checked(path)
                 )
-                has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
+                if highlight_enabled:
+                    has_unchecked = self.folder_has_unchecked_cached(path, force_scan)
                 has_new_subfolder = (
                     highlight_enabled
                     and self.folder_key(path) in self.new_folder_highlights
                 )
-
-                if os.path.isdir(path):
-                    try:
-                        files = safe_list_files(path, self.ignore_types)
-                        latest_mtime = None
-                        for filename in files:
-                            file_path = os.path.join(path, filename)
-                            try:
-                                mtime = os.path.getmtime(file_path)
-                            except Exception:
-                                continue
-                            if latest_mtime is None or mtime > latest_mtime:
-                                latest_mtime = mtime
-                        if latest_mtime is not None:
-                            last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d")
-                    except Exception:
-                        pass
+                last_date = self.folder_latest_date(path, force_scan)
 
             r = self.folders_table.rowCount()
             self.folders_table.insertRow(r)
@@ -2791,7 +2783,7 @@ class MainWindow(QMainWindow):
                 if folder_highlight_enabled and self.folder_key(folder["path"]) in self.new_folder_highlights:
                     folder_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 if folder_highlight_enabled:
-                    folder_unchecked = self.folder_has_unchecked(folder["path"])
+                    folder_unchecked = self.folder_has_unchecked_cached(folder["path"], False)
                     if folder_unchecked:
                         folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                         has_unchecked = True
@@ -2840,6 +2832,20 @@ class MainWindow(QMainWindow):
             return
         self._category_tree_refresh_pending = True
         QTimer.singleShot(0, self.apply_category_tree_refresh)
+
+    def schedule_folder_table_refresh(self, force_scan: bool = True) -> None:
+        if self._folder_table_refresh_pending:
+            self._folder_table_refresh_force_scan = self._folder_table_refresh_force_scan or force_scan
+            return
+        self._folder_table_refresh_pending = True
+        self._folder_table_refresh_force_scan = force_scan
+        QTimer.singleShot(0, self.apply_folder_table_refresh)
+
+    def apply_folder_table_refresh(self) -> None:
+        force_scan = self._folder_table_refresh_force_scan
+        self._folder_table_refresh_pending = False
+        self._folder_table_refresh_force_scan = True
+        self.refresh_folder_table(force_scan=force_scan)
 
     def apply_category_tree_refresh(self):
         self._category_tree_refresh_pending = False
@@ -2954,6 +2960,7 @@ class MainWindow(QMainWindow):
 
         meta, rows = scan_folder(folder_path, self.ignore_types)
         self.current_meta = meta
+        self.update_folder_unchecked_cache_for_folder(folder_path, meta)
         self.current_file_rows = rows
 
         self.files_table.setRowCount(len(rows))
@@ -3061,7 +3068,7 @@ class MainWindow(QMainWindow):
             self.set_folder_tree_checked(folder_path, item.checkState(0) == Qt.Checked)
         else:
             return
-        self.refresh_folder_table()
+        self.schedule_folder_table_refresh(force_scan=False)
         self.schedule_category_tree_refresh()
 
     def on_folders_table_context_menu(self, pos):
@@ -3498,8 +3505,9 @@ class MainWindow(QMainWindow):
         if name_item:
             self.set_item_unchecked_style(name_item, not checked)
         self.update_files_header_check_state()
-        self.refresh_folder_table()
-        self.refresh_category_tree()
+        self.update_folder_unchecked_cache_for_folder(self.current_folder["path"], self.current_meta)
+        self.schedule_folder_table_refresh(force_scan=False)
+        self.schedule_category_tree_refresh()
 
     def on_files_header_clicked(self, logical_index: int):
         if logical_index != 0:
@@ -3530,8 +3538,92 @@ class MainWindow(QMainWindow):
             if name_item:
                 self.set_item_unchecked_style(name_item, not checked)
         self.files_table.blockSignals(False)
-        self.refresh_folder_table()
-        self.refresh_category_tree()
+        self.update_folder_unchecked_cache_for_folder(folder_path, self.current_meta)
+        self.schedule_folder_table_refresh(force_scan=False)
+        self.schedule_category_tree_refresh()
+
+    def folder_has_unchecked_cached(self, folder_path: str, force_scan: bool) -> bool:
+        key = self.folder_key(folder_path)
+        if not force_scan and key in self.folder_unchecked_cache:
+            return self.folder_unchecked_cache[key]
+        result = self.folder_has_unchecked(folder_path)
+        self.folder_unchecked_cache[key] = result
+        return result
+
+    def folder_latest_date(self, folder_path: str, force_scan: bool) -> str:
+        key = self.folder_key(folder_path)
+        if not force_scan and key in self.folder_latest_date_cache:
+            return self.folder_latest_date_cache[key]
+        last_date = ""
+        if os.path.isdir(folder_path):
+            try:
+                files = safe_list_files(folder_path, self.ignore_types)
+                latest_mtime = None
+                for filename in files:
+                    file_path = os.path.join(folder_path, filename)
+                    try:
+                        mtime = os.path.getmtime(file_path)
+                    except Exception:
+                        continue
+                    if latest_mtime is None or mtime > latest_mtime:
+                        latest_mtime = mtime
+                if latest_mtime is not None:
+                    last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        self.folder_latest_date_cache[key] = last_date
+        return last_date
+
+    def update_folder_unchecked_cache_for_folder(
+        self,
+        folder_path: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not folder_path:
+            return
+        if meta is None:
+            if self.current_folder and self.current_folder.get("path") == folder_path:
+                meta = self.current_meta
+        docs = meta.get("documents", {}) if isinstance(meta, dict) else {}
+        if not isinstance(docs, dict):
+            return
+        has_unchecked = False
+        for doc_key, info in docs.items():
+            if not isinstance(info, dict) or not info.get("current_file"):
+                continue
+            if not self.doc_is_checked(folder_path, doc_key, info):
+                has_unchecked = True
+                break
+        self.folder_unchecked_cache[self.folder_key(folder_path)] = has_unchecked
+
+    def schedule_settings_save(self) -> None:
+        if self._settings_save_pending:
+            return
+        self._settings_save_pending = True
+        QTimer.singleShot(200, self.apply_settings_save)
+
+    def apply_settings_save(self) -> None:
+        self._settings_save_pending = False
+        save_settings(self.settings)
+
+    def schedule_user_checks_save(self) -> None:
+        if self._user_checks_save_pending:
+            return
+        self._user_checks_save_pending = True
+        QTimer.singleShot(200, self.apply_user_checks_save)
+
+    def apply_user_checks_save(self) -> None:
+        self._user_checks_save_pending = False
+        save_user_checks(self.user_checks)
+
+    def closeEvent(self, event):  # noqa: N802
+        if self._settings_save_pending:
+            self._settings_save_pending = False
+            save_settings(self.settings)
+        if self._user_checks_save_pending:
+            self._user_checks_save_pending = False
+            save_user_checks(self.user_checks)
+        super().closeEvent(event)
 
     def update_files_header_check_state(self):
         header_item = self.files_table.horizontalHeaderItem(0)
