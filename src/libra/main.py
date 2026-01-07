@@ -784,10 +784,13 @@ class BatchPreviewDialog(QDialog):
         self.setWindowTitle("一括登録プレビュー")
         self.setMinimumWidth(720)
         self.setMinimumHeight(460)
-        self._all_checked = True
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
+        self.select_all_checkbox = QCheckBox("全選択")
+        self.select_all_checkbox.setChecked(True)
+        self.select_all_checkbox.toggled.connect(self.on_select_all_toggled)
+        layout.addWidget(self.select_all_checkbox)
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(3)
@@ -796,7 +799,6 @@ class BatchPreviewDialog(QDialog):
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.header().sectionClicked.connect(self.on_header_clicked)
         layout.addWidget(self.tree, 1)
 
         nodes: Dict[Tuple[str, ...], QTreeWidgetItem] = {}
@@ -835,12 +837,8 @@ class BatchPreviewDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def on_header_clicked(self, section: int) -> None:
-        if section != 0:
-            return
-        target_state = Qt.Unchecked if self._all_checked else Qt.Checked
-        self._all_checked = not self._all_checked
-
+    def on_select_all_toggled(self, checked: bool) -> None:
+        target_state = Qt.Checked if checked else Qt.Unchecked
         def walk(item: QTreeWidgetItem):
             item.setCheckState(0, target_state)
             for i in range(item.childCount()):
@@ -1447,6 +1445,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Libra")
         self.resize(1300, 760)
+        icon = load_app_icon()
+        if icon:
+            self.setWindowIcon(icon)
 
         self.registry = load_registry()
         self.settings = load_settings()
@@ -3139,10 +3140,14 @@ class MainWindow(QMainWindow):
         act_delete = None
         act_archive = None
         act_register_as_category = None
+        act_register_children = None
 
         if item_type == "category":
             act_register = menu.addAction("登録")
             act_batch_register = menu.addAction("一括登録")
+            category_path = data.get("path", [])
+            if isinstance(category_path, list) and self.category_folder_path_for_path(category_path):
+                act_register_children = menu.addAction("下位フォルダを登録")
             act_edit = menu.addAction("編集")
             act_delete = menu.addAction("削除")
             act_archive = menu.addAction("アーカイブ")
@@ -3166,6 +3171,14 @@ class MainWindow(QMainWindow):
             if not isinstance(initial_categories, list):
                 initial_categories = []
             self.on_batch_register_for_category(initial_categories)
+        elif action == act_register_children:
+            category_path = data.get("path", [])
+            if not isinstance(category_path, list):
+                return
+            root_path = self.category_folder_path_for_path(category_path)
+            if not root_path:
+                return
+            self.run_batch_register(root_path, 1, base_categories=category_path)
         elif action == act_edit:
             if item_type == "category":
                 category_path = data.get("path", [])
