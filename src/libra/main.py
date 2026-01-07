@@ -162,7 +162,6 @@ def load_settings() -> Dict[str, Any]:
         "archived_categories": [],
         "category_folder_paths": {},
         "folder_subfolder_counts": {},
-        "ignored_scan_paths": [],
         "ignore_types": {
             "shortcut": True,
             "bak": True,
@@ -785,6 +784,7 @@ class BatchPreviewDialog(QDialog):
         self.setWindowTitle("一括登録プレビュー")
         self.setMinimumWidth(720)
         self.setMinimumHeight(460)
+        self._all_checked = True
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
@@ -796,6 +796,7 @@ class BatchPreviewDialog(QDialog):
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.header().sectionClicked.connect(self.on_header_clicked)
         layout.addWidget(self.tree, 1)
 
         nodes: Dict[Tuple[str, ...], QTreeWidgetItem] = {}
@@ -833,6 +834,20 @@ class BatchPreviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def on_header_clicked(self, section: int) -> None:
+        if section != 0:
+            return
+        target_state = Qt.Unchecked if self._all_checked else Qt.Checked
+        self._all_checked = not self._all_checked
+
+        def walk(item: QTreeWidgetItem):
+            item.setCheckState(0, target_state)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
 
     def selected_items(self) -> List[Dict[str, Any]]:
         selected: List[Dict[str, Any]] = []
@@ -1664,6 +1679,11 @@ class MainWindow(QMainWindow):
     def category_path_key(self, path: List[str]) -> str:
         return CATEGORY_PATH_SEP.join(path)
 
+    def category_path_from_key(self, key: str) -> List[str]:
+        if not key:
+            return []
+        return [part for part in key.split(CATEGORY_PATH_SEP) if part]
+
     def category_path_for_item(self, item: Dict[str, Any]) -> List[str]:
         categories = categories_from_item(item)
         if categories:
@@ -1956,7 +1976,7 @@ class MainWindow(QMainWindow):
     def folder_key(self, folder_path: str) -> str:
         return os.path.normcase(os.path.abspath(folder_path))
 
-    def count_immediate_subfolders(self, folder_path: str, ignored_paths: Optional[set[str]] = None) -> int:
+    def count_immediate_subfolders(self, folder_path: str) -> int:
         if not os.path.isdir(folder_path):
             return 0
         try:
@@ -1966,8 +1986,6 @@ class MainWindow(QMainWindow):
                     continue
                 full = os.path.join(folder_path, name)
                 if os.path.isdir(full):
-                    if ignored_paths and self.folder_key(full) in ignored_paths:
-                        continue
                     count += 1
             return count
         except Exception:
@@ -2007,37 +2025,6 @@ class MainWindow(QMainWindow):
         counts[self.folder_key(folder_path)] = self.count_immediate_subfolders(folder_path)
         self.save_folder_subfolder_counts(counts)
 
-    def ignored_scan_paths(self) -> set[str]:
-        data = self.settings.get("ignored_scan_paths", [])
-        ignored: set[str] = set()
-        if isinstance(data, list):
-            for entry in data:
-                if isinstance(entry, str) and entry:
-                    ignored.add(self.folder_key(entry))
-        return ignored
-
-    def save_ignored_scan_paths(self, ignored: set[str]) -> None:
-        self.settings["ignored_scan_paths"] = sorted(ignored)
-        save_settings(self.settings)
-
-    def add_ignored_scan_paths(self, paths: List[str]) -> None:
-        if not paths:
-            return
-        ignored = self.ignored_scan_paths()
-        for path in paths:
-            if path:
-                ignored.add(self.folder_key(path))
-        self.save_ignored_scan_paths(ignored)
-
-    def remove_ignored_scan_paths(self, paths: List[str]) -> None:
-        if not paths:
-            return
-        ignored = self.ignored_scan_paths()
-        for path in paths:
-            if path:
-                ignored.discard(self.folder_key(path))
-        self.save_ignored_scan_paths(ignored)
-
     def remove_folder_settings_for_paths(self, paths: List[str]) -> None:
         if not paths:
             return
@@ -2050,9 +2037,6 @@ class MainWindow(QMainWindow):
         counts = self.folder_subfolder_counts()
         counts = {k: v for k, v in counts.items() if k not in keys}
         self.settings["folder_subfolder_counts"] = counts
-        ignored = self.ignored_scan_paths()
-        ignored.difference_update(keys)
-        self.settings["ignored_scan_paths"] = sorted(ignored)
         save_settings(self.settings)
 
     def remove_category_settings_under_path(self, path: List[str]) -> List[str]:
@@ -2083,11 +2067,15 @@ class MainWindow(QMainWindow):
             for item in self.registry
             if isinstance(item.get("path"), str)
         }
-        category_paths = set()
+        category_paths: set[str] = set()
         for item in self.registry:
             categories = self.category_path_for_item(item)
             for i in range(1, len(categories) + 1):
                 category_paths.add(self.category_path_key(categories[:i]))
+        order = self.category_order()
+        for key in order.get("categories", {}):
+            if isinstance(key, str) and key:
+                category_paths.add(key)
         folder_paths = set(registry_paths)
         category_folder_paths = self.category_folder_paths()
         filtered_category_folder_paths = {
@@ -2114,11 +2102,6 @@ class MainWindow(QMainWindow):
         filtered_counts = {k: v for k, v in counts.items() if k in folder_paths}
         settings_removed += len(counts) - len(filtered_counts)
         self.settings["folder_subfolder_counts"] = filtered_counts
-
-        ignored = self.ignored_scan_paths()
-        filtered_ignored = sorted(path for path in ignored if path in folder_paths)
-        settings_removed += len(ignored) - len(filtered_ignored)
-        self.settings["ignored_scan_paths"] = filtered_ignored
 
         settings_removed += len(category_folder_paths) - len(filtered_category_folder_paths)
         self.settings["category_folder_paths"] = filtered_category_folder_paths
@@ -2149,7 +2132,6 @@ class MainWindow(QMainWindow):
 
     def detect_new_subfolders(self) -> set[str]:
         counts = self.folder_subfolder_counts()
-        ignored_paths = self.ignored_scan_paths()
         highlights: set[str] = set()
         updated_counts = False
         targets: set[str] = {
@@ -2164,9 +2146,7 @@ class MainWindow(QMainWindow):
             if not root_path or not os.path.isdir(root_path):
                 continue
             root_key = self.folder_key(root_path)
-            if root_key in ignored_paths:
-                continue
-            current_count = self.count_immediate_subfolders(root_path, ignored_paths)
+            current_count = self.count_immediate_subfolders(root_path)
             if root_key not in counts:
                 counts[root_key] = current_count
                 updated_counts = True
@@ -2181,9 +2161,20 @@ class MainWindow(QMainWindow):
     def update_new_folder_highlights(self) -> None:
         self.new_folder_highlights = self.detect_new_subfolders()
         self.new_category_highlights = set()
+        category_paths_by_folder: Dict[str, set[str]] = {}
         for path, folder_path in self.category_folder_paths().items():
-            if self.folder_key(folder_path) in self.new_folder_highlights:
-                self.new_category_highlights.add(path)
+            if isinstance(folder_path, str) and folder_path:
+                category_paths_by_folder.setdefault(self.folder_key(folder_path), set()).add(path)
+        for item in self.registry:
+            categories = self.category_path_for_item(item)
+            folder_path = item.get("path")
+            if isinstance(folder_path, str) and folder_path:
+                category_paths_by_folder.setdefault(self.folder_key(folder_path), set()).update(
+                    self.category_path_key(categories[:i]) for i in range(1, len(categories) + 1)
+                )
+        for folder_key, paths in category_paths_by_folder.items():
+            if folder_key in self.new_folder_highlights:
+                self.new_category_highlights.update(paths)
 
     def doc_is_checked(self, folder_path: str, doc_key: str, doc_info: Optional[Dict[str, Any]] = None) -> bool:
         folder_key = self.folder_key(folder_path)
@@ -2513,6 +2504,18 @@ class MainWindow(QMainWindow):
             for category in categories:
                 node = node["children"].setdefault(category, {"children": {}, "folders": []})
             node["folders"].append(item)
+
+        order = self.category_order()
+        for parent_key, children in order.get("categories", {}).items():
+            if not isinstance(children, list):
+                continue
+            parent_path = self.category_path_from_key(str(parent_key))
+            node = root
+            for category in parent_path:
+                node = node["children"].setdefault(category, {"children": {}, "folders": []})
+            for name in children:
+                if isinstance(name, str) and name:
+                    node["children"].setdefault(name, {"children": {}, "folders": []})
         return root
 
     def capture_expanded_category_paths(self) -> Optional[set[str]]:
@@ -3538,7 +3541,6 @@ class MainWindow(QMainWindow):
         })
         save_registry(self.registry)
         self.record_folder_subfolder_count(path)
-        self.remove_ignored_scan_paths([path])
         self.mark_all_docs_checked(path)
         self.refresh_folder_table()
         self.refresh_category_tree()
@@ -3578,22 +3580,11 @@ class MainWindow(QMainWindow):
             return False
 
         selected_items = preview_dialog.selected_items()
-        skipped_items = preview_dialog.unchecked_items()
-        skipped_paths = [
-            item["path"] for item in skipped_items
-            if isinstance(item.get("path"), str)
-        ]
-        self.add_ignored_scan_paths(skipped_paths)
         if not selected_items:
             self.warn("取り込む項目がありません。")
             return False
         self.registry.extend(selected_items)
         save_registry(self.registry)
-        selected_paths = [
-            item["path"] for item in selected_items
-            if isinstance(item.get("path"), str)
-        ]
-        self.remove_ignored_scan_paths(selected_paths)
         preview_counts = self.preview_subfolder_counts(root_path, items)
         for item in selected_items:
             folder_path = item.get("path")
