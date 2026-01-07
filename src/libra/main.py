@@ -831,7 +831,7 @@ class BatchPreviewDialog(QDialog):
             parent_item.setCheckState(0, Qt.Checked)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("取り込む")
+        buttons.button(QDialogButtonBox.Ok).setText("登録")
         buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -2652,7 +2652,10 @@ class MainWindow(QMainWindow):
                     and self.is_folder_tree_checked(path)
                 )
                 has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
-                has_new_subfolder = self.folder_key(path) in self.new_folder_highlights
+                has_new_subfolder = (
+                    highlight_enabled
+                    and self.folder_key(path) in self.new_folder_highlights
+                )
 
                 if os.path.isdir(path):
                     try:
@@ -2680,7 +2683,8 @@ class MainWindow(QMainWindow):
                 it_name = QTableWidgetItem(f"{icon_prefix}{name}")
                 if category_folder_path:
                     it_name.setToolTip(category_folder_path)
-                    if self.category_path_key(path) in self.new_category_highlights:
+                    highlight_enabled = self.is_category_highlight_enabled_for_path(path)
+                    if highlight_enabled and self.category_path_key(path) in self.new_category_highlights:
                         has_new_subfolder = True
                 it_name.setData(Qt.UserRole, {"type": "category", "path": path})
             else:
@@ -2739,8 +2743,6 @@ class MainWindow(QMainWindow):
                 child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 if folder_path:
                     child_item.setToolTip(0, folder_path)
-                    if self.category_path_key(child_path) in self.new_category_highlights:
-                        child_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
@@ -2752,6 +2754,8 @@ class MainWindow(QMainWindow):
                     child_item.setExpanded(True)
                 child_highlight_enabled = highlight_enabled and child_checked
                 child_unchecked = add_nodes(child_item, child_node, child_path, child_highlight_enabled)
+                if child_highlight_enabled and self.category_path_key(child_path) in self.new_category_highlights:
+                    child_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 if child_unchecked and child_highlight_enabled:
                     child_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                     has_unchecked = True
@@ -2768,9 +2772,9 @@ class MainWindow(QMainWindow):
                     "path": folder["path"],
                     "category_path": path,
                 })
-                if self.folder_key(folder["path"]) in self.new_folder_highlights:
-                    folder_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 folder_highlight_enabled = highlight_enabled and folder_checked
+                if folder_highlight_enabled and self.folder_key(folder["path"]) in self.new_folder_highlights:
+                    folder_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 if folder_highlight_enabled:
                     folder_unchecked = self.folder_has_unchecked(folder["path"])
                     if folder_unchecked:
@@ -3598,12 +3602,18 @@ class MainWindow(QMainWindow):
             return False
 
         selected_items = preview_dialog.selected_items()
+        preview_counts = self.preview_subfolder_counts(root_path, items)
+        for folder_path, count in preview_counts.items():
+            self.set_folder_subfolder_count(folder_path, count)
+
         if not selected_items:
-            self.warn("取り込む項目がありません。")
-            return False
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+            self.info("登録を行いませんでした。")
+            return True
+
         self.registry.extend(selected_items)
         save_registry(self.registry)
-        preview_counts = self.preview_subfolder_counts(root_path, items)
         for item in selected_items:
             folder_path = item.get("path")
             if isinstance(folder_path, str):
