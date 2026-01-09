@@ -485,6 +485,38 @@ class CategoryTreeWidget(QTreeWidget):
         self.order_changed.emit()
 
 
+class FileDropTable(QTableWidget):
+    files_dropped = Signal(list)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        paths = [url.toLocalFile() for url in urls if url.toLocalFile()]
+        if not paths:
+            event.ignore()
+            return
+        self.files_dropped.emit(paths)
+        event.acceptProposedAction()
+
+
 def scan_folder(
     folder_path: str,
     ignore_types: Optional[Dict[str, Any]] = None,
@@ -1573,16 +1605,20 @@ class MainWindow(QMainWindow):
         btn_replace = QPushButton("差し替え")
         btn_replace.clicked.connect(self.on_replace)
 
+        btn_add = QPushButton("追加")
+        btn_add.clicked.connect(self.on_add)
+
         btn_view = QPushButton("閲覧")
         btn_view.clicked.connect(self.on_view)
 
         files_button_row = QHBoxLayout()
         files_button_row.addWidget(btn_update)
         files_button_row.addWidget(btn_replace)
+        files_button_row.addWidget(btn_add)
         files_button_row.addWidget(btn_view)
         files_button_row.addStretch(1)
 
-        self.files_table = QTableWidget(0, 6)
+        self.files_table = FileDropTable(0, 6)
         self.files_table.setHorizontalHeaderLabels(["", "ファイル", "rev", "更新日", "更新者", "DocKey"])
         files_header_item = QTableWidgetItem("")
         files_header_item.setFlags(files_header_item.flags() | Qt.ItemIsUserCheckable)
@@ -1602,6 +1638,7 @@ class MainWindow(QMainWindow):
         self.files_table.itemChanged.connect(self.on_file_check_changed)
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
+        self.files_table.files_dropped.connect(self.on_files_dropped)
 
         hist_group = QWidget()
         hist_layout = QVBoxLayout(hist_group)
@@ -3948,6 +3985,63 @@ class MainWindow(QMainWindow):
             self.warn("メタデータが見つかりません。再スキャンしてください。")
             return None
         return self.current_folder["path"], doc_key, info
+
+    def add_files_to_current_folder(self, paths: List[str]) -> None:
+        if not self.current_folder:
+            self.warn("フォルダを選択してください。")
+            return
+        folder_path = self.current_folder["path"]
+        if not os.path.isdir(folder_path):
+            self.warn("登録フォルダが見つかりません。パスを確認してください。")
+            return
+
+        added_files = []
+        skipped_files = []
+        error_messages = []
+        seen_destinations = set()
+
+        for path in paths:
+            if not path or not os.path.isfile(path):
+                continue
+            dest_name = os.path.basename(path)
+            dest_path = os.path.join(folder_path, dest_name)
+            dest_key = os.path.normcase(os.path.abspath(dest_path))
+            if dest_key in seen_destinations:
+                skipped_files.append(dest_name)
+                continue
+            seen_destinations.add(dest_key)
+            if os.path.normcase(os.path.abspath(path)) == dest_key:
+                skipped_files.append(dest_name)
+                continue
+            if os.path.exists(dest_path):
+                skipped_files.append(dest_name)
+                continue
+            try:
+                shutil.copy2(path, dest_path)
+                added_files.append(dest_name)
+            except Exception as e:
+                error_messages.append(f"{dest_name}: {e}")
+
+        if added_files:
+            self.refresh_files_table()
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+        if skipped_files:
+            self.warn("同名ファイルが存在するため追加できませんでした:\n" + "\n".join(sorted(set(skipped_files))))
+        if error_messages:
+            self.warn("追加時にエラーが発生しました:\n" + "\n".join(error_messages))
+
+    def on_add(self):
+        if not self.current_folder:
+            self.warn("フォルダを選択してください。")
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "追加するファイルを選択")
+        if not paths:
+            return
+        self.add_files_to_current_folder(paths)
+
+    def on_files_dropped(self, paths: List[str]):
+        self.add_files_to_current_folder(paths)
 
     def on_update(self):
         sel = self._get_selected_doc()
