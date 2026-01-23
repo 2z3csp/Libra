@@ -23,7 +23,7 @@ import sys
 import datetime as dt
 import getpass
 from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Callable
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPalette
@@ -605,8 +605,8 @@ def scan_folder(
                 memo=info.get("last_memo", ""),
             )
         )
-    # Sort by updated_at desc then filename
-    rows.sort(key=lambda r: (r.updated_at or "", r.filename), reverse=True)
+    # Sort by filename
+    rows.sort(key=lambda r: r.filename.lower())
     return meta, rows
 
 
@@ -1028,6 +1028,14 @@ class VersionSelectDialog(QDialog):
         bump_layout.addWidget(self.radio_patch)
         layout.addWidget(self.bump_group)
 
+        submission_row = QHBoxLayout()
+        self.submission_check = QCheckBox("提出ファイル生成")
+        self.submission_memo = QLineEdit()
+        self.submission_memo.setPlaceholderText("メモ")
+        submission_row.addWidget(self.submission_check)
+        submission_row.addWidget(self.submission_memo, 1)
+        layout.addLayout(submission_row)
+
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("OK")
         self.buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
@@ -1054,6 +1062,12 @@ class VersionSelectDialog(QDialog):
 
     def selected_next_version(self) -> Tuple[int, int, int]:
         return next_rev_with_bump(self.current_rev, self.selected_bump())
+
+    def submission_checked(self) -> bool:
+        return self.submission_check.isChecked()
+
+    def submission_memo_text(self) -> str:
+        return self.submission_memo.text().strip()
 
 
 class HistoryClearDialog(QDialog):
@@ -1233,10 +1247,19 @@ class HistorySelectDialog(QDialog):
 
 
 class HistoryDetailDialog(QDialog):
-    def __init__(self, entry: Dict[str, Any], parent: QWidget | None = None):
+    def __init__(
+        self,
+        entry: Dict[str, Any],
+        doc_key: str,
+        on_save: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("履歴詳細")
         self.setMinimumWidth(560)
+        self.doc_key = doc_key
+        self.entry = entry
+        self.on_save = on_save
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -1254,18 +1277,50 @@ class HistoryDetailDialog(QDialog):
         form.addRow("ファイル", QLabel(file_name))
         layout.addLayout(form)
 
+        memo_row = QHBoxLayout()
         memo_label = QLabel("メモ")
-        memo_view = QPlainTextEdit()
-        memo_view.setReadOnly(True)
-        memo_view.setPlainText(entry.get("memo", "") or "")
-        layout.addWidget(memo_label)
-        layout.addWidget(memo_view)
+        self.memo_edit_button = QPushButton("編集")
+        self.memo_edit_button.clicked.connect(self.enable_memo_edit)
+        memo_row.addWidget(memo_label)
+        memo_row.addWidget(self.memo_edit_button)
+        memo_row.addStretch(1)
+
+        self.memo_view = QPlainTextEdit()
+        self.memo_view.setReadOnly(True)
+        self.memo_original = entry.get("memo", "") or ""
+        self.memo_view.setPlainText(self.memo_original)
+        layout.addLayout(memo_row)
+        layout.addWidget(self.memo_view)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.button(QDialogButtonBox.Ok).setText("閉じる")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self.on_close)
         layout.addWidget(buttons)
 
+    def enable_memo_edit(self):
+        if not self.memo_view.isReadOnly():
+            return
+        self.memo_view.setReadOnly(False)
+        self.memo_view.setFocus()
+
+    def on_close(self):
+        current_memo = self.memo_view.toPlainText().strip()
+        if current_memo == (self.memo_original or ""):
+            self.accept()
+            return
+        result = QMessageBox.question(
+            self,
+            "確認",
+            "メモを保存しますか？",
+            QMessageBox.Save | QMessageBox.Cancel,
+        )
+        if result != QMessageBox.Save:
+            return
+        if self.on_save:
+            if not self.on_save(self.doc_key, self.entry, current_memo):
+                return
+        self.memo_original = current_memo
+        self.accept()
 
 class MemoDialog(QDialog):
     def __init__(self, title: str, subtitle: str, default_memo: str = "", parent: QWidget | None = None):
@@ -1572,8 +1627,12 @@ class MainWindow(QMainWindow):
         btn_edit_folder = QPushButton("編集")
         btn_edit_folder.clicked.connect(self.on_edit_selected_folder)
 
+        btn_export_folder = QPushButton("フォルダ出力")
+        btn_export_folder.clicked.connect(self.on_export_selected_folder)
+
         folders_button_row = QHBoxLayout()
         folders_button_row.addWidget(btn_edit_folder)
+        folders_button_row.addWidget(btn_export_folder)
         folders_button_row.addStretch(1)
 
         self.folders_table = QTableWidget(0, 2)
@@ -3811,6 +3870,71 @@ class MainWindow(QMainWindow):
             return
         self.edit_registered_folder(path)
 
+    def on_export_selected_folder(self):
+        idx = self.selected_folder_index()
+        if idx < 0:
+            self.warn("フォルダを選択してください。")
+            return
+        it = self.folders_table.item(idx, 0)
+        if not it:
+            self.warn("登録情報が見つかりません。")
+            return
+        path = it.data(Qt.UserRole)
+        if not isinstance(path, str):
+            self.warn("フォルダを選択してください。")
+            return
+        if not os.path.isdir(path):
+            self.warn("フォルダが存在しません。")
+            return
+        dest_root = QFileDialog.getExistingDirectory(self, "出力先フォルダを選択")
+        if not dest_root:
+            return
+        dest_name = os.path.basename(os.path.normpath(path))
+        dest_folder = os.path.join(dest_root, dest_name)
+        if os.path.exists(dest_folder):
+            self.warn("出力先に同名のフォルダが存在します。別の場所を選択してください。")
+            return
+        try:
+            skipped, errors = self.copy_folder_for_export(path, dest_folder)
+        except Exception as e:
+            self.warn(f"フォルダ出力に失敗しました: {e}")
+            return
+        if errors:
+            self.warn("フォルダ出力時にエラーが発生しました:\n" + "\n".join(errors))
+            return
+        if skipped:
+            self.warn("既に存在するため一部のファイルを出力できませんでした:\n" + "\n".join(skipped))
+        self.info("フォルダ出力が完了しました。")
+
+    def copy_folder_for_export(self, src_folder: str, dest_folder: str) -> Tuple[List[str], List[str]]:
+        skipped: List[str] = []
+        errors: List[str] = []
+        for root, dirnames, filenames in os.walk(src_folder):
+            dirnames[:] = [
+                d for d in dirnames
+                if d.lower() not in {"_history", LEGACY_META_DIR.lower()}
+            ]
+            rel_root = os.path.relpath(root, src_folder)
+            target_root = dest_folder if rel_root == "." else os.path.join(dest_folder, rel_root)
+            os.makedirs(target_root, exist_ok=True)
+            for filename in filenames:
+                if filename.lower() == META_FILENAME.lower():
+                    continue
+                if filename.lower() == LEGACY_META_FILENAME.lower():
+                    continue
+                src_path = os.path.join(root, filename)
+                doc_base, _t, _rev = parse_rev_from_filename(filename)
+                dest_name = doc_base
+                dest_path = os.path.join(target_root, dest_name)
+                if os.path.exists(dest_path):
+                    skipped.append(os.path.relpath(dest_path, dest_folder))
+                    continue
+                try:
+                    shutil.copy2(src_path, dest_path)
+                except Exception as e:
+                    errors.append(f"{os.path.relpath(src_path, src_folder)}: {e}")
+        return skipped, errors
+
     def on_folder_selected(self):
         idx = self.selected_folder_index()
         if idx < 0:
@@ -3901,8 +4025,49 @@ class MainWindow(QMainWindow):
         entry = data_item.data(Qt.UserRole)
         if not isinstance(entry, dict):
             return
-        dlg = HistoryDetailDialog(entry, self)
+        file_idx = self.selected_file_index()
+        if file_idx < 0 or file_idx >= len(self.current_file_rows):
+            return
+        doc_key = self.current_file_rows[file_idx].doc_key
+        dlg = HistoryDetailDialog(entry, doc_key, self.update_history_memo, self)
         dlg.exec()
+
+    def update_history_memo(self, doc_key: str, entry: Dict[str, Any], memo: str) -> bool:
+        if not self.current_folder:
+            self.warn("フォルダを選択してください。")
+            return False
+        folder_path = self.current_folder["path"]
+        meta = load_meta(folder_path)
+        docs = meta.get("documents", {})
+        info = docs.get(doc_key)
+        if not isinstance(info, dict):
+            self.warn("メタデータが見つかりません。")
+            return False
+        if entry.get("kind") == "最新":
+            info["last_memo"] = memo
+        else:
+            history = info.get("history", [])
+            if not isinstance(history, list):
+                self.warn("履歴が見つかりません。")
+                return False
+            found = False
+            for item in history:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("rev") == entry.get("rev") and item.get("file") == entry.get("file"):
+                    item["memo"] = memo
+                    found = True
+                    break
+            if not found:
+                self.warn("対象の履歴が見つかりません。")
+                return False
+        docs[doc_key] = info
+        meta["documents"] = docs
+        save_meta(folder_path, meta)
+        self.current_meta = meta
+        self.refresh_right_pane_for_doc(doc_key)
+        self.refresh_files_table()
+        return True
 
     def on_rescan(self):
         self.update_new_folder_highlights()
@@ -4058,6 +4223,8 @@ class MainWindow(QMainWindow):
         version_dialog = VersionSelectDialog(cur_rev, self.version_rules, self)
         if version_dialog.exec() != QDialog.Accepted:
             return
+        submission_checked = version_dialog.submission_checked()
+        submission_memo = version_dialog.submission_memo_text()
 
         _base_name, ext = split_name_ext(cur_fn)
         doc_base, _ver_tuple, _rev_str = parse_rev_from_filename(cur_fn)
@@ -4104,7 +4271,7 @@ class MainWindow(QMainWindow):
                     "current_rev": new_rev,
                     "updated_at": now_iso(),
                     "updated_by": user_name(),
-                    "last_memo": "",
+                    "last_memo": submission_memo,
                     "history": [],
                 }
             else:
@@ -4125,7 +4292,7 @@ class MainWindow(QMainWindow):
                 d["current_rev"] = new_rev
                 d["updated_at"] = now_iso()
                 d["updated_by"] = user_name()
-                d["last_memo"] = ""
+                d["last_memo"] = submission_memo
 
             meta["documents"] = docs
             save_meta(folder_path, meta)
@@ -4136,12 +4303,13 @@ class MainWindow(QMainWindow):
             self.refresh_folder_table()
             self.refresh_category_tree()
 
-            # Open the new file for convenience
-            try:
-                os.startfile(new_path)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            self.start_file_lock_watch(new_path, folder_path, doc_key)
+            if not submission_checked:
+                # Open the new file for convenience
+                try:
+                    os.startfile(new_path)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                self.start_file_lock_watch(new_path, folder_path, doc_key)
 
         except Exception as e:
             self.warn(f"更新に失敗しました: {e}")
