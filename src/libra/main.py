@@ -4614,7 +4614,9 @@ class MainWindow(QMainWindow):
         if msg.clickedButton() == btn_input:
             self.prompt_memo_input()
         elif msg.clickedButton() == btn_later:
-            self.info("後でを選択しました。作業メモは手動入力となります。")
+            self.watch_started_at = dt.datetime.now()
+            if self.watch_timer is not None:
+                self.watch_timer.start()
 
     def prompt_memo_input(self):
         if not self.watch_folder_path or not self.watch_doc_key:
