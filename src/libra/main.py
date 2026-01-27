@@ -2285,6 +2285,17 @@ class MainWindow(QMainWindow):
             if folder_key in self.new_folder_highlights:
                 self.new_category_highlights.update(paths)
 
+    def confirm_folder_check(self, folder_path: str) -> None:
+        if not folder_path:
+            return
+        if not os.path.isdir(folder_path):
+            self.warn("フォルダが存在しません。")
+            return
+        self.set_folder_subfolder_count(folder_path, self.count_immediate_subfolders(folder_path))
+        self.update_new_folder_highlights()
+        self.refresh_folder_table(force_scan=False)
+        self.refresh_category_tree()
+
     def doc_is_checked(self, folder_path: str, doc_key: str, doc_info: Optional[Dict[str, Any]] = None) -> bool:
         folder_key = self.folder_key(folder_path)
         folder_checks = self.user_checks.get(folder_key, {})
@@ -3176,14 +3187,19 @@ class MainWindow(QMainWindow):
         if not path_item:
             return
         path = path_item.data(Qt.UserRole)
-        if not path:
+        if not isinstance(path, str) or not path:
             return
 
         menu = QMenu(self)
+        act_confirm = menu.addAction("フォルダ確認")
         act_edit = menu.addAction("編集")
         act_delete = menu.addAction("削除")
+        if self.folder_key(path) not in self.new_folder_highlights:
+            act_confirm.setEnabled(False)
         action = menu.exec(self.folders_table.viewport().mapToGlobal(pos))
-        if action == act_edit:
+        if action == act_confirm:
+            self.confirm_folder_check(path)
+        elif action == act_edit:
             self.edit_registered_folder(path)
         elif action == act_delete:
             self.delete_registered_folder(path)
