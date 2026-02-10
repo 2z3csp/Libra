@@ -47,11 +47,19 @@ def user_checks_path() -> Path:
 def runtime_libra_dir() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(getattr(sys, "_MEIPASS")) / "libra"
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parent.parent
 
 
 def resource_path(*parts: str) -> Path:
     return runtime_libra_dir() / "resources" / Path(*parts)
+
+
+def checked_resource_path(*parts: str) -> Path:
+    path = resource_path(*parts)
+    if not path.exists():
+        base = runtime_libra_dir()
+        raise FileNotFoundError(f"Resource not found: {path} (runtime_libra_dir={base})")
+    return path
 
 
 def executable_dir() -> Path:

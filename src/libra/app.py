@@ -34,7 +34,7 @@ from .core.paths import (
     config_dir,
     logs_dir,
     registry_path,
-    resource_path,
+    checked_resource_path,
     settings_path,
     user_checks_path,
 )
@@ -105,7 +105,6 @@ UNCHECKED_COLOR = QColor("#C0504D")
 NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
 NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
 CATEGORY_PATH_SEP = "\u001f"
-APP_ICON_PATH = str(resource_path("icons", "Libra.ico"))
 DEFAULT_VERSION_RULES = {
     "major": "",
     "minor": "",
@@ -114,9 +113,12 @@ DEFAULT_VERSION_RULES = {
 
 
 def load_app_icon() -> Optional[QIcon]:
-    if os.path.exists(APP_ICON_PATH):
-        return QIcon(APP_ICON_PATH)
-    return None
+    try:
+        icon_path = checked_resource_path("icons", "Libra.ico")
+        return QIcon(str(icon_path))
+    except FileNotFoundError as exc:
+        print(f"[Libra] WARNING: {exc}")
+        return None
 
 
 def normalize_category_path(values: List[str]) -> List[str]:

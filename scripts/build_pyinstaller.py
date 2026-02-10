@@ -30,9 +30,9 @@ def run_git(repo_root: pathlib.Path, *args: str) -> str:
 
 
 def resolve_build_version(repo_root: pathlib.Path) -> str:
-    tag = run_git(repo_root, "describe", "--tags", "--exact-match")
-    if tag:
-        return tag
+    desc = run_git(repo_root, "describe", "--tags", "--dirty", "--always")
+    if desc:
+        return desc
 
     short_sha = run_git(repo_root, "rev-parse", "--short", "HEAD") or "nogit"
     today = dt.datetime.now().strftime("%Y%m%d")
@@ -49,10 +49,28 @@ def write_version_file(dist_dir: pathlib.Path, version: str) -> pathlib.Path:
     return version_file
 
 
-def create_archive(dist_dir: pathlib.Path, version: str) -> pathlib.Path:
+def prepare_archive_tree(dist_dir: pathlib.Path, version: str) -> pathlib.Path:
     safe_version = sanitize_for_filename(version)
-    archive_base = dist_dir.parent / f"Libra-{safe_version}"
-    archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=dist_dir.parent, base_dir=dist_dir.name)
+    package_root = dist_dir.parent / "_package"
+    package_dir = package_root / f"Libra-{safe_version}"
+    bundled_dist = package_dir / dist_dir.name
+
+    if package_root.exists():
+        shutil.rmtree(package_root)
+    bundled_dist.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(dist_dir, bundled_dist)
+    return package_dir
+
+
+def create_archive(dist_dir: pathlib.Path, version: str) -> pathlib.Path:
+    package_dir = prepare_archive_tree(dist_dir, version)
+    archive_base = package_dir.parent / package_dir.name
+    archive_path = shutil.make_archive(
+        str(archive_base),
+        "zip",
+        root_dir=package_dir.parent,
+        base_dir=package_dir.name,
+    )
     return pathlib.Path(archive_path)
 
 
