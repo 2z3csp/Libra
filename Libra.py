@@ -1,13 +1,12 @@
-# Libra.py（リポジトリ直下）
-import sys
 from pathlib import Path
+import sys
 
-# src を import 探索パスに追加
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
-sys.path.insert(0, str(SRC))
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from libra.app import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
