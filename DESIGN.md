@@ -188,7 +188,7 @@
 * 正式配布はタグ（`vX.Y.Z`）付きコミットを原則とし、タグなし配布は検証版として扱う。
 * 配布アプリは `VERSION.txt` を最優先で表示し、未配置時のみ `src/libra/__init__.py` の `__version__` を表示する。
 * PyInstaller の実行入口は `src/pyinstaller_entry.py`（`from libra.app import main`）とし、onefile/onedir でのトップレベル実行時も相対import失敗を回避する。
-* `--onedir` 配布では `--contents-directory _internal` を必須とし、非対応の PyInstaller ではビルドを中断してアップグレードを促す。
+* `--onedir` 配布では `--contents-directory _internal` 対応版 PyInstaller で同オプションを指定する。非対応版では既定で警告継続（従来レイアウト）とし、`--strict-internal-layout` 指定時のみビルドを中断する。
 * 配布zip名はプロダクト版（`src/libra/__init__.py` の `__version__`）を採用し、`VERSION.txt` には `プロダクト版+ビルド識別子` を保存して利用者表示と障害解析を両立する。
 
 ---
@@ -240,7 +240,7 @@
 | 2026-02-10 | `core/`/`ui/` の配置方針を `src/libra/` 配下へ統一し、PyInstaller のビルド入口を `src/libra/app.py` 固定のスクリプトで明文化 | デバッグ配布時の同梱漏れとビルド再現性の揺れを避けるため | ディレクトリ構成/ビルド運用 |
 | 2026-02-10 | PyInstaller 実行入口を `src/pyinstaller_entry.py` に分離し、配布zip名をプロダクト版（例: `Libra-0.1.0`）固定・`VERSION.txt` を `プロダクト版+ビルド識別子` へ変更 | 配布物名を利用者向けバージョンで安定化しつつ、`app.py` 直接実行で起きる相対import失敗を防ぎ、トラブル時の追跡性を維持するため | ビルド運用/起動安定性/配布物命名 |
 | 2026-02-10 | `--onedir` 配布で `--contents-directory _internal` を採用し、実行ファイル直下の DLL/PYD を内部ディレクトリへ集約 | 配布フォルダ直下の視認性を改善し、運用時のファイル識別を容易にするため | ビルド運用/配布物構造 |
-| 2026-02-10 | `--contents-directory` を onedir 配布の必須要件へ変更し、非対応版では明示エラーでビルド停止する方針へ改定 | `_internal` 集約を確実に担保し、依存ファイルが実行ファイル直下へ散在する状態を防ぐため | ビルド運用/互換性/配布品質 |
+| 2026-02-10 | `--contents-directory` 非対応環境向けに「既定は警告継続、`--strict-internal-layout` 指定時のみ中断」の2モード運用へ改定 | 旧PyInstaller環境でのビルド可用性を確保しつつ、必要時は厳格に `_internal` 集約要件を強制できるようにするため | ビルド運用/互換性/配布品質 |
 
 ---
 

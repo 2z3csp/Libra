@@ -42,7 +42,20 @@ def test_build_pyinstaller_command_includes_contents_directory_when_supported(mo
     assert cmd[-1] == str(entry)
 
 
-def test_build_pyinstaller_command_requires_contents_directory_support(monkeypatch, tmp_path: Path):
+def test_build_pyinstaller_command_skips_contents_directory_when_unsupported(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: False)
+
+    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data)
+
+    assert "--contents-directory" not in cmd
+    assert cmd[-1] == str(entry)
+
+
+def test_build_pyinstaller_command_requires_contents_directory_support_in_strict_mode(monkeypatch, tmp_path: Path):
     repo_root = tmp_path
     entry = repo_root / "src" / "pyinstaller_entry.py"
     add_data = "dummy;libra/resources"
@@ -50,7 +63,7 @@ def test_build_pyinstaller_command_requires_contents_directory_support(monkeypat
     monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: False)
 
     try:
-        bp.build_pyinstaller_command(repo_root, entry, add_data)
+        bp.build_pyinstaller_command(repo_root, entry, add_data, strict_internal_layout=True)
         raised = False
     except RuntimeError:
         raised = True
@@ -69,3 +82,8 @@ def test_supports_contents_directory_option_detects_help_text(monkeypatch, tmp_p
 
     monkeypatch.setattr(bp.subprocess, "run", lambda *a, **k: R("usage: pyinstaller"))
     assert bp.supports_contents_directory_option(tmp_path) is False
+
+
+def test_parse_args_accepts_strict_internal_layout_flag():
+    args = bp.parse_args(["--strict-internal-layout"])
+    assert args.strict_internal_layout is True
