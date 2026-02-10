@@ -14,7 +14,6 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import List
 
 
 VERSION_RE = re.compile(r"^__version__\s*=\s*['\"](?P<version>[^'\"]+)['\"]")
@@ -112,7 +111,7 @@ def supports_contents_directory_option(repo_root: pathlib.Path) -> bool:
     return "--contents-directory" in help_text
 
 
-def build_pyinstaller_command(repo_root: pathlib.Path, entry: pathlib.Path, add_data: str) -> List[str]:
+def build_pyinstaller_command(repo_root: pathlib.Path, entry: pathlib.Path, add_data: str) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -122,8 +121,12 @@ def build_pyinstaller_command(repo_root: pathlib.Path, entry: pathlib.Path, add_
         "--onedir",
     ]
 
-    if supports_contents_directory_option(repo_root):
-        cmd.extend(["--contents-directory", "_internal"])
+    if not supports_contents_directory_option(repo_root):
+        print("[build] ERROR: installed PyInstaller does not support --contents-directory.")
+        print("[build]        Please upgrade PyInstaller (recommended >= 6.0) to build onedir with _internal layout.")
+        raise RuntimeError("PyInstaller --contents-directory is required")
+
+    cmd.extend(["--contents-directory", "_internal"])
 
     cmd.extend(
         [

@@ -42,17 +42,20 @@ def test_build_pyinstaller_command_includes_contents_directory_when_supported(mo
     assert cmd[-1] == str(entry)
 
 
-def test_build_pyinstaller_command_skips_contents_directory_when_unsupported(monkeypatch, tmp_path: Path):
+def test_build_pyinstaller_command_requires_contents_directory_support(monkeypatch, tmp_path: Path):
     repo_root = tmp_path
     entry = repo_root / "src" / "pyinstaller_entry.py"
     add_data = "dummy;libra/resources"
 
     monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: False)
 
-    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data)
+    try:
+        bp.build_pyinstaller_command(repo_root, entry, add_data)
+        raised = False
+    except RuntimeError:
+        raised = True
 
-    assert "--contents-directory" not in cmd
-    assert cmd[-1] == str(entry)
+    assert raised is True
 
 
 def test_supports_contents_directory_option_detects_help_text(monkeypatch, tmp_path: Path):
