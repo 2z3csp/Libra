@@ -67,6 +67,7 @@ TEMP_FILE_RE = re.compile(r"^~\$")  # Office temporary files
 META_FILENAME = ".libra_meta.json"
 LEGACY_META_DIR = "_Meta"
 LEGACY_META_FILENAME = "docmeta.json"
+META_SAVE_WARNED_PATHS: set[str] = set()
 
 
 def now_iso() -> str:
@@ -267,10 +268,18 @@ def save_meta(folder_path: str, meta: Dict[str, Any]) -> None:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         set_hidden_on_windows(p)
+        META_SAVE_WARNED_PATHS.discard(p)
     except PermissionError as e:
-        print(f"[WARN] Failed to save metadata (permission denied): {p} ({e})")
+        if p not in META_SAVE_WARNED_PATHS:
+            print(
+                "[WARN] Failed to save metadata (permission denied): "
+                f"{p} ({e}) / フォルダ権限・読み取り専用・同期競合を確認してください"
+            )
+            META_SAVE_WARNED_PATHS.add(p)
     except OSError as e:
-        print(f"[WARN] Failed to save metadata: {p} ({e})")
+        if p not in META_SAVE_WARNED_PATHS:
+            print(f"[WARN] Failed to save metadata: {p} ({e})")
+            META_SAVE_WARNED_PATHS.add(p)
 
 
 def split_name_ext(filename: str) -> Tuple[str, str]:
