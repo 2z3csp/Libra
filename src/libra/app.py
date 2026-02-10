@@ -22,12 +22,23 @@ import shutil
 import sys
 import datetime as dt
 import getpass
+import platform
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List, Callable
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPalette
-from . import __version__ as APP_VERSION
+from .core.paths import (
+    appdata_root,
+    cache_dir,
+    config_dir,
+    logs_dir,
+    registry_path,
+    resource_path,
+    settings_path,
+    user_checks_path,
+)
+from .core.version import resolve_app_version
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -84,25 +95,17 @@ def user_name() -> str:
     return getpass.getuser()
 
 
-def appdata_dir() -> str:
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "Libra")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
-SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
-USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
+APP_VERSION = resolve_app_version()
+REGISTRY_PATH = str(registry_path())
+SETTINGS_PATH = str(settings_path())
+USER_CHECKS_PATH = str(user_checks_path())
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 NON_LOCKED_IDLE_SECONDS = 15
 UNCHECKED_COLOR = QColor("#C0504D")
 NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
 NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
 CATEGORY_PATH_SEP = "\u001f"
-PACKAGE_DIR = os.path.abspath(os.path.dirname(__file__))
-RESOURCE_DIR = os.path.join(PACKAGE_DIR, "resources")
-APP_ICON_PATH = os.path.join(RESOURCE_DIR, "icons", "Libra.ico")
+APP_ICON_PATH = str(resource_path("icons", "Libra.ico"))
 DEFAULT_VERSION_RULES = {
     "major": "",
     "minor": "",
@@ -1577,7 +1580,10 @@ class MainWindow(QMainWindow):
         self.version_rules = normalize_version_rules(self.settings.get("version_rules"))
 
         print(f"[Libra] version={APP_VERSION}")
-        print(f"[Libra] appdata_dir={appdata_dir()}")
+        print(f"[Libra] appdata_root={appdata_root()}")
+        print(f"[Libra] config_dir={config_dir()}")
+        print(f"[Libra] logs_dir={logs_dir()}")
+        print(f"[Libra] cache_dir={cache_dir()}")
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1595,6 +1601,9 @@ class MainWindow(QMainWindow):
         act_cache_clear = QAction("キャッシュクリア", self)
         act_cache_clear.triggered.connect(self.on_cache_clear)
         toolbar.addAction(act_cache_clear)
+        act_report = QAction("不具合報告情報をコピー", self)
+        act_report.triggered.connect(self.on_copy_bug_report)
+        toolbar.addAction(act_report)
 
         # Top controls
         top = QHBoxLayout()
@@ -4745,6 +4754,21 @@ class MainWindow(QMainWindow):
             self.refresh_folder_table()
             self.refresh_right_pane_for_doc(watch_state.doc_key)
 
+
+    def on_copy_bug_report(self):
+        report_lines = [
+            f"version: {APP_VERSION}",
+            f"os: {platform.platform()}",
+            f"python: {sys.version.split()[0]}",
+            f"appdata_root: {appdata_root()}",
+            f"config_dir: {config_dir()}",
+            f"logs_dir: {logs_dir()}",
+            f"cache_dir: {cache_dir()}",
+        ]
+        report = "\n".join(report_lines)
+        clipboard = QApplication.clipboard()
+        clipboard.setText(report)
+        QMessageBox.information(self, "不具合報告", "不具合報告情報をクリップボードにコピーしました。")
 
 def main() -> int:
     app = QApplication(sys.argv)
