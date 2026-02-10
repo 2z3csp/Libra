@@ -27,6 +27,8 @@ from typing import Optional, Tuple, Dict, Any, List, Callable
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPalette
+from . import __version__ as APP_VERSION
+
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -1555,7 +1557,7 @@ class OptionsDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Libra")
+        self.setWindowTitle(f"Libra v{APP_VERSION}")
         self.resize(1300, 760)
         icon = load_app_icon()
         if icon:
@@ -1573,6 +1575,9 @@ class MainWindow(QMainWindow):
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
         self.ignore_types = normalize_ignore_types(self.settings.get("ignore_types"))
         self.version_rules = normalize_version_rules(self.settings.get("version_rules"))
+
+        print(f"[Libra] version={APP_VERSION}")
+        print(f"[Libra] appdata_dir={appdata_dir()}")
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -4741,7 +4746,7 @@ class MainWindow(QMainWindow):
             self.refresh_right_pane_for_doc(watch_state.doc_key)
 
 
-def main():
+def main() -> int:
     app = QApplication(sys.argv)
     icon = load_app_icon()
     if icon:
@@ -4750,8 +4755,8 @@ def main():
     if icon:
         w.setWindowIcon(icon)
     w.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
