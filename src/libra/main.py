@@ -93,6 +93,7 @@ REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
 SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
 USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
+NON_LOCKED_IDLE_SECONDS = 15
 UNCHECKED_COLOR = QColor("#C0504D")
 NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
 NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
@@ -475,6 +476,18 @@ class FileRow:
     updated_at: str
     updated_by: str
     memo: str
+
+
+@dataclass
+class MemoWatchState:
+    file_path: str
+    folder_path: str
+    doc_key: str
+    started_at: dt.datetime
+    last_activity_at: dt.datetime
+    has_lock_seen: bool = False
+    has_been_modified: bool = False
+    last_mtime: Optional[float] = None
 
 
 class CategoryTreeWidget(QTreeWidget):
@@ -1747,10 +1760,7 @@ class MainWindow(QMainWindow):
         self.current_file_rows: List[FileRow] = []
         self.selected_category_path: List[str] = []
         self.watch_timer = None
-        self.watch_target_path = ""
-        self.watch_folder_path = ""
-        self.watch_doc_key = ""
-        self.watch_started_at: Optional[dt.datetime] = None
+        self.watch_states: Dict[str, MemoWatchState] = {}
         self.current_user = user_name()
         self._category_tree_refreshing = False
         self._category_tree_refresh_pending = False
@@ -4609,32 +4619,92 @@ class MainWindow(QMainWindow):
             self.watch_timer = QTimer(self)
             self.watch_timer.setInterval(5000)
             self.watch_timer.timeout.connect(self.on_watch_timer)
-        self.watch_timer.stop()
-        self.watch_target_path = file_path
-        self.watch_folder_path = folder_path
-        self.watch_doc_key = doc_key
-        self.watch_started_at = dt.datetime.now()
+
+        now = dt.datetime.now()
+        mtime = None
+        try:
+            mtime = os.path.getmtime(file_path)
+        except OSError:
+            mtime = None
+
+        self.watch_states[file_path] = MemoWatchState(
+            file_path=file_path,
+            folder_path=folder_path,
+            doc_key=doc_key,
+            started_at=now,
+            last_activity_at=now,
+            has_lock_seen=False,
+            has_been_modified=False,
+            last_mtime=mtime,
+        )
         self.watch_timer.start()
 
-    def on_watch_timer(self):
-        if not self.watch_target_path:
+    def stop_watch_if_idle(self):
+        if self.watch_timer is not None and not self.watch_states:
             self.watch_timer.stop()
-            return
-        if not os.path.exists(self.watch_target_path):
-            self.watch_timer.stop()
-            return
-        if self.watch_started_at is None:
-            self.watch_started_at = dt.datetime.now()
-        elapsed = (dt.datetime.now() - self.watch_started_at).total_seconds()
-        if elapsed >= self.memo_timeout_min * 60:
-            self.watch_timer.stop()
-            self.prompt_memo_timeout()
-            return
-        if not is_file_locked(self.watch_target_path):
-            self.watch_timer.stop()
-            self.prompt_memo_input()
 
-    def prompt_memo_timeout(self):
+    def on_watch_timer(self):
+        if not self.watch_states:
+            self.stop_watch_if_idle()
+            return
+
+        now = dt.datetime.now()
+        should_prompt: List[MemoWatchState] = []
+        should_timeout: List[MemoWatchState] = []
+        remove_paths: List[str] = []
+
+        for file_path, state in list(self.watch_states.items()):
+            if not os.path.exists(file_path):
+                remove_paths.append(file_path)
+                continue
+
+            elapsed = (now - state.started_at).total_seconds()
+            if elapsed >= self.memo_timeout_min * 60:
+                should_timeout.append(state)
+                remove_paths.append(file_path)
+                continue
+
+            locked = is_file_locked(file_path)
+            if locked:
+                state.has_lock_seen = True
+                state.last_activity_at = now
+
+            mtime = state.last_mtime
+            try:
+                new_mtime = os.path.getmtime(file_path)
+            except OSError:
+                new_mtime = mtime
+
+            if mtime is None:
+                state.last_mtime = new_mtime
+            elif new_mtime is not None and new_mtime != mtime:
+                state.has_been_modified = True
+                state.last_activity_at = now
+                state.last_mtime = new_mtime
+
+            if state.has_lock_seen and not locked:
+                should_prompt.append(state)
+                remove_paths.append(file_path)
+                continue
+
+            if state.has_been_modified and not locked:
+                idle = (now - state.last_activity_at).total_seconds()
+                if idle >= NON_LOCKED_IDLE_SECONDS:
+                    should_prompt.append(state)
+                    remove_paths.append(file_path)
+
+        for path in remove_paths:
+            self.watch_states.pop(path, None)
+
+        for state in should_timeout:
+            self.prompt_memo_timeout(state)
+
+        for state in should_prompt:
+            self.prompt_memo_input(state)
+
+        self.stop_watch_if_idle()
+
+    def prompt_memo_timeout(self, watch_state: MemoWatchState):
         msg = QMessageBox(self)
         msg.setWindowTitle("メモ入力")
         msg.setText("一定時間が経過しました。作業メモを入力しますか？")
@@ -4642,33 +4712,33 @@ class MainWindow(QMainWindow):
         btn_later = msg.addButton("後で", QMessageBox.RejectRole)
         msg.exec()
         if msg.clickedButton() == btn_input:
-            self.prompt_memo_input()
+            self.prompt_memo_input(watch_state)
         elif msg.clickedButton() == btn_later:
-            self.watch_started_at = dt.datetime.now()
+            watch_state.started_at = dt.datetime.now()
+            watch_state.last_activity_at = watch_state.started_at
+            self.watch_states[watch_state.file_path] = watch_state
             if self.watch_timer is not None:
                 self.watch_timer.start()
 
-    def prompt_memo_input(self):
-        if not self.watch_folder_path or not self.watch_doc_key:
-            return
-        subtitle = f"対象ファイル: {os.path.basename(self.watch_target_path)}"
+    def prompt_memo_input(self, watch_state: MemoWatchState):
+        subtitle = f"対象ファイル: {os.path.basename(watch_state.file_path)}"
         dlg = MemoDialog("作業メモ入力", subtitle, "", self)
         if dlg.exec() != QDialog.Accepted:
             return
         memo = dlg.get_memo()
         if not memo:
             return
-        meta = load_meta(self.watch_folder_path)
+        meta = load_meta(watch_state.folder_path)
         docs = meta.get("documents", {})
-        doc = docs.get(self.watch_doc_key)
+        doc = docs.get(watch_state.doc_key)
         if isinstance(doc, dict):
             doc["last_memo"] = memo
-            docs[self.watch_doc_key] = doc
+            docs[watch_state.doc_key] = doc
             meta["documents"] = docs
-            save_meta(self.watch_folder_path, meta)
+            save_meta(watch_state.folder_path, meta)
             self.refresh_files_table()
             self.refresh_folder_table()
-            self.refresh_right_pane_for_doc(self.watch_doc_key)
+            self.refresh_right_pane_for_doc(watch_state.doc_key)
 
 
 def main():
