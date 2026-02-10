@@ -14,7 +14,7 @@ SRC_DIR = os.path.abspath(os.path.join(TESTS_DIR, "..", "src"))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from libra.main import HistoryClearDialog, should_select_minor, should_select_patch
+from libra.app import HistoryClearDialog, should_select_minor, should_select_patch
 
 
 def build_history_items(revs):
