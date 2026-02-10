@@ -263,9 +263,14 @@ def load_meta(folder_path: str) -> Dict[str, Any]:
 
 def save_meta(folder_path: str, meta: Dict[str, Any]) -> None:
     p = meta_path_for_folder(folder_path)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    set_hidden_on_windows(p)
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        set_hidden_on_windows(p)
+    except PermissionError as e:
+        print(f"[WARN] Failed to save metadata (permission denied): {p} ({e})")
+    except OSError as e:
+        print(f"[WARN] Failed to save metadata: {p} ({e})")
 
 
 def split_name_ext(filename: str) -> Tuple[str, str]:
