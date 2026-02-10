@@ -25,3 +25,34 @@ def test_prepare_archive_tree_creates_versioned_root(tmp_path: Path):
 
     assert package_dir.name == "Libra-v1.0.0-abc"
     assert (package_dir / "Libra" / "Libra.exe").exists()
+
+
+def test_pyinstaller_command_places_binaries_under_internal(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    (repo_root / "src" / "libra").mkdir(parents=True)
+    (repo_root / "src" / "libra" / "__init__.py").write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    (repo_root / "src" / "pyinstaller_entry.py").write_text('print("entry")\n', encoding="utf-8")
+
+    captured = {}
+
+    def fake_call(cmd, cwd):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        dist = repo_root / "dist" / "Libra"
+        dist.mkdir(parents=True, exist_ok=True)
+        return 0
+
+    monkeypatch.setattr(bp, "subprocess", type("S", (), {"call": staticmethod(fake_call)}))
+    monkeypatch.setattr(bp, "resolve_build_version", lambda _root: "v0.1.0-1-gabc")
+
+    old_file = bp.__file__
+    bp.__file__ = str(repo_root / "scripts" / "build_pyinstaller.py")
+    try:
+        assert bp.main() == 0
+    finally:
+        bp.__file__ = old_file
+
+    cmd = captured["cmd"]
+    assert "--contents-directory" in cmd
+    idx = cmd.index("--contents-directory")
+    assert cmd[idx + 1] == "_internal"

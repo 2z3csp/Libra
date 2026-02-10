@@ -112,6 +112,8 @@ def main() -> int:
         "--noconfirm",
         "--clean",
         "--onedir",
+        "--contents-directory",
+        "_internal",
         "--name",
         "Libra",
         "--paths",
