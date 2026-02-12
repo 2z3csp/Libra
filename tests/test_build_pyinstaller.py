@@ -87,3 +87,30 @@ def test_supports_contents_directory_option_detects_help_text(monkeypatch, tmp_p
 def test_parse_args_accepts_strict_internal_layout_flag():
     args = bp.parse_args(["--strict-internal-layout"])
     assert args.strict_internal_layout is True
+
+
+def test_build_pyinstaller_command_uses_default_icon_path(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: True)
+
+    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data)
+
+    icon_idx = cmd.index("--icon")
+    assert cmd[icon_idx + 1] == str(repo_root / "src" / "libra" / "resources" / "icons" / "Libra.ico")
+
+
+def test_build_pyinstaller_command_allows_overriding_icon_path(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+    icon_path = repo_root / "custom" / "icon.ico"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: True)
+
+    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data, icon_path=icon_path)
+
+    icon_idx = cmd.index("--icon")
+    assert cmd[icon_idx + 1] == str(icon_path)
