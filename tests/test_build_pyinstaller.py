@@ -25,3 +25,65 @@ def test_prepare_archive_tree_creates_versioned_root(tmp_path: Path):
 
     assert package_dir.name == "Libra-v1.0.0-abc"
     assert (package_dir / "Libra" / "Libra.exe").exists()
+
+
+def test_build_pyinstaller_command_includes_contents_directory_when_supported(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: True)
+
+    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data)
+
+    assert "--contents-directory" in cmd
+    idx = cmd.index("--contents-directory")
+    assert cmd[idx + 1] == "_internal"
+    assert cmd[-1] == str(entry)
+
+
+def test_build_pyinstaller_command_skips_contents_directory_when_unsupported(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: False)
+
+    cmd = bp.build_pyinstaller_command(repo_root, entry, add_data)
+
+    assert "--contents-directory" not in cmd
+    assert cmd[-1] == str(entry)
+
+
+def test_build_pyinstaller_command_requires_contents_directory_support_in_strict_mode(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path
+    entry = repo_root / "src" / "pyinstaller_entry.py"
+    add_data = "dummy;libra/resources"
+
+    monkeypatch.setattr(bp, "supports_contents_directory_option", lambda _root: False)
+
+    try:
+        bp.build_pyinstaller_command(repo_root, entry, add_data, strict_internal_layout=True)
+        raised = False
+    except RuntimeError:
+        raised = True
+
+    assert raised is True
+
+
+def test_supports_contents_directory_option_detects_help_text(monkeypatch, tmp_path: Path):
+    class R:
+        def __init__(self, stdout: str, stderr: str = ""):
+            self.stdout = stdout
+            self.stderr = stderr
+
+    monkeypatch.setattr(bp.subprocess, "run", lambda *a, **k: R("... --contents-directory DIR ..."))
+    assert bp.supports_contents_directory_option(tmp_path) is True
+
+    monkeypatch.setattr(bp.subprocess, "run", lambda *a, **k: R("usage: pyinstaller"))
+    assert bp.supports_contents_directory_option(tmp_path) is False
+
+
+def test_parse_args_accepts_strict_internal_layout_flag():
+    args = bp.parse_args(["--strict-internal-layout"])
+    assert args.strict_internal_layout is True

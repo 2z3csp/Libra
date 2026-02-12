@@ -7,6 +7,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import os
 import pathlib
@@ -17,6 +18,16 @@ import sys
 
 
 VERSION_RE = re.compile(r"^__version__\s*=\s*['\"](?P<version>[^'\"]+)['\"]")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build Libra desktop app with PyInstaller")
+    parser.add_argument(
+        "--strict-internal-layout",
+        action="store_true",
+        help="Fail the build when PyInstaller does not support --contents-directory",
+    )
+    return parser.parse_args(argv)
 
 
 def run_git(repo_root: pathlib.Path, *args: str) -> str:
@@ -96,7 +107,64 @@ def create_archive(dist_dir: pathlib.Path, product_version: str) -> pathlib.Path
     return pathlib.Path(archive_path)
 
 
-def main() -> int:
+def supports_contents_directory_option(repo_root: pathlib.Path) -> bool:
+    """Return True when installed PyInstaller supports --contents-directory."""
+    result = subprocess.run(
+        [sys.executable, "-m", "PyInstaller", "--help"],
+        cwd=repo_root,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    return "--contents-directory" in help_text
+
+
+def build_pyinstaller_command(
+    repo_root: pathlib.Path,
+    entry: pathlib.Path,
+    add_data: str,
+    *,
+    strict_internal_layout: bool = False,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onedir",
+    ]
+
+    if not supports_contents_directory_option(repo_root):
+        message = (
+            "[build] WARNING: installed PyInstaller does not support --contents-directory. "
+            "Building without _internal layout."
+        )
+        if strict_internal_layout:
+            print(message.replace("WARNING", "ERROR"))
+            print("[build]        Please upgrade PyInstaller (recommended >= 6.0).")
+            raise RuntimeError("PyInstaller --contents-directory is required in strict mode")
+        print(message)
+    else:
+        cmd.extend(["--contents-directory", "_internal"])
+
+    cmd.extend(
+        [
+            "--name",
+            "Libra",
+            "--paths",
+            str(repo_root / "src"),
+            "--add-data",
+            add_data,
+            str(entry),
+        ]
+    )
+    return cmd
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     repo_root = pathlib.Path(__file__).resolve().parents[1]
     entry = repo_root / "src" / "pyinstaller_entry.py"
     resources_src = repo_root / "src" / "libra" / "resources"
@@ -105,21 +173,12 @@ def main() -> int:
     product_version = resolve_product_version(repo_root)
     runtime_version = compose_runtime_version(product_version, build_id)
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--noconfirm",
-        "--clean",
-        "--onedir",
-        "--name",
-        "Libra",
-        "--paths",
-        str(repo_root / "src"),
-        "--add-data",
+    cmd = build_pyinstaller_command(
+        repo_root,
+        entry,
         add_data,
-        str(entry),
-    ]
+        strict_internal_layout=args.strict_internal_layout,
+    )
 
     print("[build] repo_root:", repo_root)
     print("[build] entry:", entry)
