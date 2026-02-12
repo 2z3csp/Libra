@@ -124,6 +124,7 @@ def build_pyinstaller_command(
     repo_root: pathlib.Path,
     entry: pathlib.Path,
     add_data: str,
+    icon_path: pathlib.Path | None = None,
     *,
     strict_internal_layout: bool = False,
 ) -> list[str]:
@@ -153,6 +154,8 @@ def build_pyinstaller_command(
         [
             "--name",
             "Libra",
+            "--icon",
+            str(icon_path or (repo_root / "src" / "libra" / "resources" / "icons" / "Libra.ico")),
             "--paths",
             str(repo_root / "src"),
             "--add-data",
@@ -177,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root,
         entry,
         add_data,
+        icon_path=repo_root / "src" / "libra" / "resources" / "icons" / "Libra.ico",
         strict_internal_layout=args.strict_internal_layout,
     )
 
