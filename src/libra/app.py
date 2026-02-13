@@ -483,6 +483,7 @@ class FileRow:
     updated_at: str
     updated_by: str
     memo: str
+    missing: bool = False
 
 
 @dataclass
@@ -605,14 +606,12 @@ def scan_folder(
                 docs[doc_key]["current_rev"] = parse_rev_from_filename(fn)[2]
                 changed = True
 
-    # Remove docs whose current file no longer exists and are not present in scan
+    # Remove docs that no longer have a current file name.
+    # Missing files with a remembered current_file stay in docs and are highlighted in UI.
     stale_keys = []
     for doc_key, info in docs.items():
         cur_fn = info.get("current_file", "") if isinstance(info, dict) else ""
         if not cur_fn:
-            stale_keys.append(doc_key)
-            continue
-        if cur_fn not in files and doc_key not in latest_by_doc:
             stale_keys.append(doc_key)
     if stale_keys:
         for key in stale_keys:
@@ -637,6 +636,7 @@ def scan_folder(
                 updated_at=info.get("updated_at", ""),
                 updated_by=info.get("updated_by", ""),
                 memo=info.get("last_memo", ""),
+                missing=cur_fn not in files,
             )
         )
     # Sort by filename
@@ -3125,6 +3125,8 @@ class MainWindow(QMainWindow):
             it_fn = QTableWidgetItem(row.filename)
             it_fn.setToolTip(os.path.join(folder_path, row.filename))
             self.set_item_unchecked_style(it_fn, not is_checked)
+            if row.missing:
+                it_fn.setBackground(UNCHECKED_COLOR)
             self.files_table.setItem(r, 1, it_fn)
             self.files_table.setItem(r, 2, QTableWidgetItem(display_rev(row.rev)))
             self.files_table.setItem(r, 3, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
