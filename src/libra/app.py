@@ -104,6 +104,8 @@ NON_LOCKED_IDLE_SECONDS = 15
 UNCHECKED_COLOR = QColor("#C0504D")
 NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
 NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
+MISSING_FOLDER_BG_COLOR_LIGHT = QColor("#F4CCCC")
+MISSING_FOLDER_BG_COLOR_DARK = QColor("#5A1F1F")
 CATEGORY_PATH_SEP = "\u001f"
 DEFAULT_VERSION_RULES = {
     "major": "",
@@ -2409,11 +2411,23 @@ class MainWindow(QMainWindow):
         else:
             item.setBackground(QBrush())
 
+    def set_item_missing_folder_style(self, item: QTableWidgetItem, missing: bool) -> None:
+        if missing:
+            item.setBackground(QBrush(self.missing_folder_bg_color()))
+        else:
+            item.setBackground(QBrush())
+
     def new_folder_bg_color(self) -> QColor:
         base_color = self.palette().color(QPalette.Base)
         if base_color.lightness() < 128:
             return NEW_FOLDER_BG_COLOR_DARK
         return NEW_FOLDER_BG_COLOR_LIGHT
+
+    def missing_folder_bg_color(self) -> QColor:
+        base_color = self.palette().color(QPalette.Base)
+        if base_color.lightness() < 128:
+            return MISSING_FOLDER_BG_COLOR_DARK
+        return MISSING_FOLDER_BG_COLOR_LIGHT
 
     def registry_index_by_path(self, path: str) -> int:
         for idx, item in enumerate(self.registry):
@@ -2814,6 +2828,7 @@ class MainWindow(QMainWindow):
             last_date = ""
             has_unchecked = False
             has_new_subfolder = False
+            missing_folder = False
             if item_type == "folder":
                 categories = item.get("categories") or []
                 highlight_enabled = (
@@ -2827,6 +2842,7 @@ class MainWindow(QMainWindow):
                     and self.folder_key(path) in self.new_folder_highlights
                 )
                 last_date = self.folder_latest_date(path, force_scan)
+                missing_folder = not os.path.isdir(path)
 
             r = self.folders_table.rowCount()
             self.folders_table.insertRow(r)
@@ -2848,10 +2864,12 @@ class MainWindow(QMainWindow):
                 it_name.setData(Qt.UserRole, path)
             self.set_item_unchecked_style(it_name, has_unchecked)
             self.set_item_new_folder_style(it_name, has_new_subfolder)
+            self.set_item_missing_folder_style(it_name, missing_folder)
 
             self.folders_table.setItem(r, 0, it_name)
             it_date = QTableWidgetItem(last_date)
             self.set_item_new_folder_style(it_date, has_new_subfolder)
+            self.set_item_missing_folder_style(it_date, missing_folder)
             self.folders_table.setItem(r, 1, it_date)
 
         self.folders_table.repaint()
